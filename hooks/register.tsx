@@ -70,9 +70,16 @@ export function refsInText(text: string): Found[] {
 }
 
 /** gh issue|pr 명령에서 저장소·번호·동작을 찾는다. 번호가 없는 create 는 결과의 URL 로 잇는다 */
+/** 셸이 실제로 실행하는 부분만 남긴다: heredoc 본문과 따옴표 안 문자열은 명령이 아니라 데이터다 */
+export function executedPart(command: string): string {
+  return command
+    .replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2(?=\s|$)/g, '<<heredoc')
+    .replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''")
+}
+
 export function refsInGhCommand(command: string, resultText: string): Found[] {
   const found: Found[] = []
-  for (const m of command.matchAll(GH_COMMAND)) {
+  for (const m of executedPart(command).matchAll(GH_COMMAND)) {
     const isPull = m[1] === 'pr'
     const action = m[2] ?? ''
     const rest = m[3] ?? ''
@@ -121,6 +128,8 @@ export function collectIssues(
     for (const use of message.toolUses ?? []) {
       const command = typeof use.input.command === 'string' ? use.input.command : ''
       const resultText = use.text ?? ''
+      // 명령 결과는 gh 명령을 실행한 Bash 의 결과만 본다. 파일을 읽은 결과의 예시 URL 은 참조가 아니다
+      if (use.tool !== 'Bash' || !/\bgh\s/.test(executedPart(command))) continue
       for (const ref of refsInGhCommand(command, resultText)) add(ref, order, 'gh 명령')
       for (const ref of refsInText(resultText)) add(ref, order, '명령 결과')
     }
@@ -383,7 +392,9 @@ async function fetchMeta($: EngineInterface, ref: IssueRef): Promise<IssueMeta> 
   const ran = await $.process.run(['sh', '-c', script, 'sh', githubUser, ref.owner, ref.repo, String(ref.number)], {
     timeoutMs: 20000,
   })
-  if (ran.exitCode !== 0) return { error: ran.stderr.trim().split('\n')[0] ?? '읽지 못함' }
+  if (ran.exitCode !== 0) {
+    return { error: ran.stderr.trim().split('\n')[0] ?? '읽지 못함', notFound: /Not Found|HTTP 404/i.test(ran.stderr + ran.stdout) }
+  }
   return parseMeta(ran.stdout)
 }
 
@@ -1001,6 +1012,10 @@ export const register: Register = (on, options) => {
     const view = await read($, tree)
     const list = await read($, issues)
     const metas = await read($, issueMeta)
+    const visibleIssues = list.filter(ref => {
+      const meta = metas[ref.key]
+      return !(meta && 'error' in meta && meta.notFound)
+    })
     const issueAt = await read($, issuesAt)
     const hits = await read($, skillHits)
     const skillAt = await read($, skillsAt)
@@ -1143,10 +1158,10 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column">
               <Box flexDirection="row">
                 <Button key="refresh-issues" onPress={() => refreshIssues($)}>새로고침</Button>
-                <Text dimColor>{issueAt ? `  ${issueAt} 기준 · ${list.length}건` : '  아직 읽지 않았다'}</Text>
+                <Text dimColor>{issueAt ? `  ${issueAt} 기준 · ${visibleIssues.length}건` : '  아직 읽지 않았다'}</Text>
               </Box>
-              {issueAt && list.length === 0 && <Text dimColor>이 세션에서 다룬 GitHub 이슈·PR 이 없다.</Text>}
-              {list.map(ref => {
+              {issueAt && visibleIssues.length === 0 && <Text dimColor>이 세션에서 다룬 GitHub 이슈·PR 이 없다.</Text>}
+              {visibleIssues.map(ref => {
                 const meta = metas[ref.key]
                 const hasMeta = meta !== undefined && !('error' in meta)
                 const isPull = hasMeta ? meta.isPull : ref.isPull

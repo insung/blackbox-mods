@@ -92,7 +92,8 @@ export type IssueMeta =
       /** PR 의 CI: pass·fail·pending·none */
       ci: 'pass' | 'fail' | 'pending' | 'none'
     }
-  | { error: string }
+  /** notFound: GitHub 이 404 로 답함. 목록에서 숨긴다 */
+  | { error: string; notFound?: boolean }
 
 export type SkillHit = {
   /** 대화에서 나온 순서(메시지 순번) */

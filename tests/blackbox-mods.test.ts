@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Plan, QueryRun } from '../types'
-import { applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
+import { executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[] } = { runs: [], plans: [] }
@@ -373,3 +373,48 @@ test('reads PR and issue state, diff and CI', async () => {
   expect(stateBadge(parseMeta('issue\n{"state":"OPEN","stateReason":"REOPENED"}'), false).text).toBe('◉ 열림')
   expect(stateBadge(parseMeta('issue\n{"state":"CLOSED","stateReason":"NOT_PLANNED"}'), false).text).toBe('⊘ 닫힘')
 })
+
+test('reads only gh commands the shell runs, not text inside heredocs or quotes', async () => {
+  const command = "cat > t.ts <<'EOF'\nrefsInGhCommand('gh issue create --repo o/r --title t', '')\nEOF\necho 'gh pr merge https://github.com/o/r/pull/5'"
+  expect(executedPart(command)).not.toContain('o/r')
+  expect(refsInGhCommand(command, 'https://github.com/o/r/issues/12')).toEqual([])
+  expect(refsInGhCommand("gh issue view 40 --repo IGAWorksDev/dmp.crawler --json title --jq '.title'", '')[0]?.number).toBe(40)
+})
+
+test('scans results only of Bash calls that ran gh', async () => {
+  const list = collectIssues([
+    {
+      role: 'assistant',
+      text: '',
+      toolUses: [
+        { tool: 'Read', input: { file_path: '/x/test.ts' }, text: 'https://github.com/o/r/issues/9' },
+        { tool: 'Bash', input: { command: 'cat test.ts' }, text: 'https://github.com/o/r/issues/7' },
+        { tool: 'Bash', input: { command: 'gh issue create --repo a/b --title t' }, text: 'https://github.com/a/b/issues/3' },
+      ],
+    },
+  ])
+  expect(list.map(r => r.key)).toEqual(['a/b#3'])
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`hides refs GitHub does not know on ${surface}`, async ($, on) => {
+    on('session.messages', async () => ({
+      value: [{ role: 'user', text: 'https://github.com/a/b/issues/1 와 https://github.com/o/r/issues/12', toolUses: [] }],
+    }) as any)
+    on('process.run', async (_$: unknown, e: any) => {
+      const isMissing = e.argv.includes('o')
+      return {
+        value: isMissing
+          ? { exitCode: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' }
+          : { exitCode: 0, stdout: 'issue\n{"title":"있는 이슈","state":"OPEN","stateReason":""}', stderr: '' },
+      } as any
+    })
+    on('session.cwd', async () => ({ value: '/tmp' }) as any)
+    await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface } as any)
+    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(pane).toContain('있는 이슈')
+    expect(pane).toContain('1건')
+    expect(pane).not.toContain('#12')
+  })
+}
