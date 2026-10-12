@@ -1,12 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 
-import type { Plan, QueryRun } from '../types'
-import { answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
+import type { ActionEntry, Plan, QueryRun } from '../types'
+import { actionOf, commandText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
 
 function watch(on: any) {
-  const seen: { runs: QueryRun[]; plans: Plan[] } = { runs: [], plans: [] }
+  const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
   on('state.set', async ($: unknown, e: any, next: any) => {
     if (e.key === 'runs') seen.runs = e.value
+    if (e.key === 'actions') seen.actions = e.value
     if (e.key === 'plans') seen.plans = e.value
     return next(e)
   })
@@ -349,9 +350,15 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'Bash', description: 'g', command: `python3 run_query.py -D web_mihd "-- 조회 목적: 날짜별 OS별 사용자수\nSELECT a FROM t"` } as any)
     await ($.tool.call as any)({ tool: 'Read', file_path: '/Users/b/mi/.worktree/x/README.md' } as any)
     await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__note_reads', purpose: '배치 문서 확인', result: '기준일이 -2일로 바뀌었다' } as any)
+    await ($.tool.call as any)({ tool: 'Bash', description: '배치 폴더 확인', command: 'ls batch' } as any)
+    await ($.tool.call as any)({ tool: 'Edit', file_path: '/Users/b/mi/a.py', old_string: 'x', new_string: 'y' } as any)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('카카오톡 DAU 조회')
     expect(pane.match(/── \[/g)?.length).toBe(1)
+    expect(pane).toContain('명령: 배치 폴더 확인')
+    expect(pane).toContain('$ ls batch')
+    expect(pane).toContain('수정: /Users/b/mi/a.py')
+    expect(pane).not.toContain('run_query.py')
     expect(pane).toContain('목적: 날짜별 OS별 사용자수')
     expect(pane).toContain('SELECT a FROM t')
     expect(pane).toContain('읽은 파일:')
@@ -444,3 +451,42 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(fills).toEqual(['d1: 바로 보내기'])
   })
 }
+
+test('records a Bash command that runs no query, with its goal and status', async ($, on) => {
+  const seen = watch(on)
+  answerTools(on)
+  await ($.tool.call as any)({ tool: 'Bash', description: '파일 목록', command: 'ls -la' } as any)
+  expect(seen.actions.map(one => [one.kind, one.target, one.note, one.status])).toEqual([['command', 'ls -la', '파일 목록', 'done']])
+})
+
+test('records a query once, as a query run and not as a command', async ($, on) => {
+  const seen = watch(on)
+  answerTools(on)
+  await ($.tool.call as any)({ tool: 'Bash', command: `python3 run_query.py -D web_mihd "SELECT 1"` } as any)
+  expect(seen.runs.length).toBe(1)
+  expect(seen.actions).toEqual([])
+})
+
+test('records files that Edit, Write and NotebookEdit change', async ($, on) => {
+  const seen = watch(on)
+  answerTools(on)
+  await ($.tool.call as any)({ tool: 'Write', file_path: '/tmp/a.ts', content: 'x' } as any)
+  await ($.tool.call as any)({ tool: 'Edit', file_path: '/tmp/a.ts', old_string: 'x', new_string: 'y' } as any)
+  expect(seen.actions.map(one => [one.kind, one.target, one.note])).toEqual([
+    ['file', '/tmp/a.ts', '작성'],
+    ['file', '/tmp/a.ts', '수정'],
+  ])
+})
+
+test('marks failed and denied commands, and skips files a call did not change', async () => {
+  expect(actionOf({ tool: 'Bash', command: 'false' }, { isError: true })?.status).toBe('failed')
+  expect(actionOf({ tool: 'Bash', command: 'rm x' }, { deny: 'no' })?.status).toBe('denied')
+  expect(actionOf({ tool: 'Edit', file_path: '/tmp/a' }, { isError: true })).toBe(undefined)
+  expect(actionOf({ tool: 'NotebookEdit', notebook_path: '/tmp/n.ipynb' }, {})?.target).toBe('/tmp/n.ipynb')
+  expect(actionOf({ tool: 'Read', file_path: '/tmp/a' }, {})).toBe(undefined)
+})
+
+test('shows the first lines of a long command', async () => {
+  expect(commandText('a\nb')).toBe('a\nb')
+  expect(commandText('a\nb\nc\nd')).toBe('a\nb\nc\n… (전체 4줄)')
+})

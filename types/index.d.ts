@@ -36,6 +36,20 @@ export type ReadEntry = {
   result: string
 }
 
+/** Claude 가 실행한 명령(DB 쿼리 제외) 또는 바꾼 파일 하나 */
+export type ActionEntry = {
+  id: string
+  t: number
+  at: string
+  turn: number
+  kind: 'command' | 'file'
+  /** command: 실행한 명령, file: 파일 경로 */
+  target: string
+  /** command: Bash description, file: 수정·작성 */
+  note: string
+  status: 'done' | 'failed' | 'denied'
+}
+
 export type PlanStep = {
   text: string
   /** 다이어그램에 쓰는 짧은 이름 */
@@ -158,6 +172,7 @@ declare module 'claude-code' {
       turns: Turn[]
       reads: ReadEntry[]
       runs: QueryRun[]
+      actions: ActionEntry[]
       plans: Plan[]
       places: string[]
       tree: TreeView | null

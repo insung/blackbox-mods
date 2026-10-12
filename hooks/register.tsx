@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { Decision, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, TabId, TreeView, Turn, Worktree } from '../types'
+import type { ActionEntry, Decision, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, TabId, TreeView, Turn, Worktree } from '../types'
 
 const LOG_PANE = 'blackbox-mods'
 const TABS: { id: TabId; label: string }[] = [
@@ -39,6 +39,7 @@ const PURPOSE_RULE = [
 const turns = atom({ plugin: 'blackbox-mods', key: 'turns' } as const, [] as Turn[])
 const reads = atom({ plugin: 'blackbox-mods', key: 'reads' } as const, [] as ReadEntry[])
 const runs = atom({ plugin: 'blackbox-mods', key: 'runs' } as const, [] as QueryRun[])
+const actions = atom({ plugin: 'blackbox-mods', key: 'actions' } as const, [] as ActionEntry[])
 const plans = atom({ plugin: 'blackbox-mods', key: 'plans' } as const, [] as Plan[])
 const places = atom({ plugin: 'blackbox-mods', key: 'places' } as const, [] as string[])
 const tree = atom({ plugin: 'blackbox-mods', key: 'tree' } as const, null as TreeView | null)
@@ -698,6 +699,41 @@ async function noteTool($: EngineInterface, e: { tool: string } & Record<string,
   if (isNew || e.tool === 'Bash') await refreshTree($)
 }
 
+const COMMAND_LINES = 3
+
+/** 도구 호출 하나를 세션 로그 항목으로 바꾼다. 기록하지 않는 호출이면 undefined */
+export function actionOf(
+  e: { tool: string; tool_use_id?: string } & Record<string, unknown>,
+  ran: { deny?: string; isError?: boolean },
+): Omit<ActionEntry, 't' | 'at' | 'turn'> | undefined {
+  const id = e.tool_use_id ?? `a${Date.now()}`
+  const status: ActionEntry['status'] = ran.deny !== undefined ? 'denied' : ran.isError ? 'failed' : 'done'
+  if (e.tool === 'Bash') {
+    const command = typeof e.command === 'string' ? e.command.trim() : ''
+    if (!command || QUERY_COMMAND.test(command)) return undefined
+    const note = typeof e.description === 'string' ? e.description.trim() : ''
+    return { id, kind: 'command', target: command, note, status }
+  }
+  if (!['Edit', 'Write', 'NotebookEdit'].includes(e.tool) || status !== 'done') return undefined
+  const file = typeof e.file_path === 'string' ? e.file_path : typeof e.notebook_path === 'string' ? e.notebook_path : ''
+  if (!file) return undefined
+  return { id, kind: 'file', target: file, note: e.tool === 'Write' ? '작성' : '수정', status }
+}
+
+/** 명령을 앞 몇 줄로 줄인다 */
+export function commandText(command: string): string {
+  const lines = command.split('\n')
+  const shown = lines.slice(0, COMMAND_LINES).join('\n')
+  return lines.length > COMMAND_LINES ? `${shown}\n… (전체 ${lines.length}줄)` : shown
+}
+
+async function recordAction($: EngineInterface, e: { tool: string } & Record<string, unknown>, ran: { deny?: string; isError?: boolean }) {
+  const action = actionOf(e, ran)
+  if (!action) return
+  const entry: ActionEntry = { ...action, t: Date.now(), at: timeNow(), turn: await currentTurn($) }
+  await update($, actions, list => [...list, entry].slice(-200))
+}
+
 async function record($: EngineInterface, e: { command: string; description?: string; tool_use_id: string }): Promise<QueryRun> {
   let sql = sqlOf(e.command)
   const file = e.command.match(/--file[\s=]+(\S+)/)?.[1]
@@ -979,6 +1015,9 @@ export const register: Register = (on, options) => {
       const file = (e as unknown as { file_path?: unknown }).file_path
       if (typeof file === 'string' && file) await recordRead($, file).catch(() => undefined)
     }
+    if (['Bash', 'Edit', 'Write', 'NotebookEdit'].includes(e.tool)) {
+      await recordAction($, e as unknown as { tool: string } & Record<string, unknown>, ran).catch(() => undefined)
+    }
     if (['Bash', 'Read', 'Edit', 'Write', 'NotebookEdit'].includes(e.tool)) {
       await noteTool($, e as unknown as { tool: string } & Record<string, unknown>).catch(() => undefined)
     }
@@ -1001,6 +1040,7 @@ export const register: Register = (on, options) => {
       ...(await read($, plans)).map(plan => ({ kind: 'plan' as const, t: plan.t, turn: plan.turn ?? 0, at: plan.at, plan })),
       ...(await read($, runs)).map(run => ({ kind: 'run' as const, t: run.t ?? 0, turn: run.turn ?? 0, at: run.at, run })),
       ...(await read($, reads)).map(entry => ({ kind: 'read' as const, t: entry.t, turn: entry.turn, at: entry.at, entry })),
+      ...(await read($, actions)).map(action => ({ kind: 'action' as const, t: action.t, turn: action.turn, at: action.at, action })),
     ].sort((x, y) => x.t - y.t)
     const logGroups: { key: string; title: string; items: typeof entries }[] = []
     for (const item of entries) {
@@ -1078,6 +1118,19 @@ export const register: Register = (on, options) => {
                           <Text dimColor>{`  ${file}`}</Text>
                         ))}
                         {entry.result ? <Text>{`결과: ${entry.result}`}</Text> : <Text dimColor>결과: (Claude 가 아직 정리하지 않음)</Text>}
+                      </Box>
+                    )
+                  }
+                  if (item.kind === 'action') {
+                    const action = item.action
+                    const mark = action.status === 'failed' ? ' (실패)' : action.status === 'denied' ? ' (거부됨)' : ''
+                    if (action.kind === 'file') {
+                      return <Text>{`${action.note}: ${action.target}`}</Text>
+                    }
+                    return (
+                      <Box flexDirection="column">
+                        <Text dimColor>{`명령${mark}${action.note ? `: ${action.note}` : ''}`}</Text>
+                        <Text>{`  $ ${commandText(action.target).replace(/\n/g, '\n    ')}`}</Text>
                       </Box>
                     )
                   }
