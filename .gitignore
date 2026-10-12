@@ -1,0 +1,13 @@
+# Claude Code 가 mod 를 로드할 때 만드는 타입 파일
+.claude-plugin/types/
+
+# 작업용 git worktree
+.worktree/
+
+# OS·에디터
+.DS_Store
+.vscode/
+.idea/
+
+# 의존성
+node_modules/
