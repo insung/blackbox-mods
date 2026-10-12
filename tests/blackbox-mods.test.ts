@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Plan, QueryRun } from '../types'
-import { executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
+import { answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[] } = { runs: [], plans: [] }
@@ -416,5 +416,31 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(pane).toContain('있는 이슈')
     expect(pane).toContain('1건')
     expect(pane).not.toContain('#12')
+  })
+}
+
+test('builds the answer line for a picked option', async () => {
+  expect(answerLine('d2', '프롬프트 창에 채우기', '')).toBe('d2: 프롬프트 창에 채우기')
+  expect(answerLine('d2', 'A', '그리고 이것도  \n')).toBe('그리고 이것도\nd2: A')
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`fills the prompt box when an option is pressed on ${surface}`, async ($, on) => {
+    const fills: string[] = []
+    on('process.run', async () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }) as any)
+    on('session.cwd', async () => ({ value: '/tmp' }) as any)
+    on('prompt.read', async () => ({ value: { text: '', cursor: 0 } }) as any)
+    on('prompt.fill', async (_$: unknown, e: any) => {
+      fills.push(e.text)
+      return { isFilled: true } as any
+    })
+    await ($.tool.call as any)({
+      tool: 'mcp__blackbox-mods__track_decisions',
+      items: [{ question: '답 방식', options: ['채우기', '바로 보내기'], recommended: '채우기', status: 'pending', decidedBy: 'user' }],
+    })
+    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(pane).toContain('채우기 (권장)')
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'pick-d1-1', surface } as any)
+    expect(fills).toEqual(['d1: 바로 보내기'])
   })
 }

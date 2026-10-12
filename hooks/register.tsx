@@ -23,6 +23,7 @@ const DECISION_RULE = [
   '요청을 분석해 Claude 가 스스로 정했고 사용자에게 묻지 않아도 되는 항목은 status decided, decidedBy claude 로 등록한다.',
   '사용자가 답하면 그 답으로 정해진 항목을 id 로 가리켜 status decided(또는 취소면 dropped)와 answer(무엇으로 정해졌는지, 그 결과 한 일을 짧게)로 갱신한다. 사용자 답변 원문은 도구가 자동으로 붙인다.',
   'AskUserQuestion 대화창의 질문과 답은 자동으로 기록되므로 따로 등록하지 않는다.',
+  '사용자가 `d2: 선택지` 처럼 결정 id 와 선택지로 답하면, 그 id 의 항목을 그 선택지로 정해진 것으로 보고 track_decisions 로 갱신한다.',
 ].join('\n')
 
 const READ_RULE = [
@@ -660,6 +661,18 @@ export const OPEN_IN_VSCODE = [
   'else open -a "Visual Studio Code" "$1"; fi',
 ].join(' ')
 
+/** 결정 선택지를 누르면 `d1: 선택지` 를 프롬프트 창에 채운다. 쓰던 글이 있으면 그 뒤 줄에 붙인다. 보내기는 사용자가 한다 */
+export function answerLine(id: string, option: string, draft: string): string {
+  const line = `${id}: ${option}`
+  return draft.trim() ? `${draft.replace(/\s+$/, '')}\n${line}` : line
+}
+
+async function pickOption($: EngineInterface, id: string, option: string): Promise<void> {
+  const box = await $.prompt.read()
+  const filled = await $.prompt.fill({ text: answerLine(id, option, box.text), mode: 'replace' })
+  if (!filled.isFilled) $.ui.toast(`프롬프트 창을 채우지 못했다. 직접 입력한다: ${id}: ${option}`)
+}
+
 async function openInVsCode($: EngineInterface, path: string): Promise<void> {
   const ran = await $.process.run(['sh', '-c', OPEN_IN_VSCODE, 'sh', path], { timeoutMs: 15000 }).catch(error => ({
     exitCode: 1,
@@ -1105,8 +1118,23 @@ export const register: Register = (on, options) => {
                       <Text bold={one.status === 'pending'} color={one.status === 'pending' ? 'warning' : undefined}>
                         {`${box} ${index + 1}. ${one.question}${one.status === 'pending' ? '' : result}${one.decidedBy === 'claude' ? '  (Claude 가 정함)' : ''}`}
                       </Text>
-                      {one.status === 'pending' && (one.options.length > 0 || one.recommended) && (
-                        <Text dimColor>{`    ${one.options.length > 0 ? `선택지: ${one.options.join(' / ')}` : ''}${one.options.length > 0 && one.recommended ? ' · ' : ''}${one.recommended ? `권장: ${one.recommended}` : ''}`}</Text>
+                      {one.status === 'pending' && one.options.length > 0 && (
+                        <Box flexDirection="row" flexWrap="wrap">
+                          <Text dimColor>    선택지: </Text>
+                          {one.options.map((option, n) => (
+                            <Button
+                              key={`pick-${one.id}-${n}`}
+                              label={option === one.recommended ? `${option} (권장)` : option}
+                              onPress={() => pickOption($, one.id, option)}
+                            />
+                          ))}
+                        </Box>
+                      )}
+                      {one.status === 'pending' && one.recommended && !one.options.includes(one.recommended) && (
+                        <Text dimColor>{`    권장: ${one.recommended}`}</Text>
+                      )}
+                      {one.status === 'pending' && one.options.length > 0 && (
+                        <Text dimColor>    누르면 프롬프트 창에 답이 채워진다. Enter 로 보낸다</Text>
                       )}
                       {one.status !== 'pending' && one.decidedBy === 'user' && one.userQuote && <Text dimColor>{`    -> ${quoteOf(one)}`}</Text>}
                     </Box>
