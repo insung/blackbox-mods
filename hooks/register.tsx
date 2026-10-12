@@ -32,7 +32,7 @@ const READ_RULE = [
 ].join('\n')
 
 const PURPOSE_RULE = [
-  'MI DB 쿼리(run_query.py, mysql)를 실행할 때는 SQL 문장마다 맨 앞에 `-- 조회 목적: <이 쿼리로 무엇을 왜 확인하는지 한 문장>` 주석을 붙인다.',
+  'DB 쿼리(run_query.py, mysql)를 실행할 때는 SQL 문장마다 맨 앞에 `-- 조회 목적: <이 쿼리로 무엇을 왜 확인하는지 한 문장>` 주석을 붙인다.',
   '사용자는 Blackbox 패널에서 이 주석을 쿼리 설명으로 읽는다. Bash 명령의 description 은 그 작업의 짧은 목표로 쓴다.',
 ].join('\n')
 
