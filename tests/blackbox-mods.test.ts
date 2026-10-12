@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { ActionEntry, Plan, QueryRun } from '../types'
-import { actionOf, commandText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
+import { actionOf, commandText, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
@@ -355,8 +355,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('카카오톡 DAU 조회')
     expect(pane.match(/── \[/g)?.length).toBe(1)
-    expect(pane).toContain('명령: 배치 폴더 확인')
+    expect(pane).toContain('목적: 배치 폴더 확인')
     expect(pane).toContain('$ ls batch')
+    expect(pane).toContain('  | a |\\n  |---|\\n  | 1 |')
     expect(pane).toContain('수정: /Users/b/mi/a.py')
     expect(pane).not.toContain('run_query.py')
     expect(pane).toContain('목적: 날짜별 OS별 사용자수')
@@ -486,7 +487,28 @@ test('marks failed and denied commands, and skips files a call did not change', 
   expect(actionOf({ tool: 'Read', file_path: '/tmp/a' }, {})).toBe(undefined)
 })
 
-test('shows the first lines of a long command', async () => {
-  expect(commandText('a\nb')).toBe('a\nb')
-  expect(commandText('a\nb\nc\nd')).toBe('a\nb\nc\n… (전체 4줄)')
+test('shortens a long command to the start of its first line', async () => {
+  expect(commandText('ls -la')).toBe('ls -la')
+  expect(commandText('a\nb\nc\nd')).toBe('a … (전체 4줄)')
+  expect(commandText(`echo ${'x'.repeat(100)}`)).toBe(`echo ${'x'.repeat(75)}…`)
+  expect(commandText(`echo ${'x'.repeat(100)}\nls`)).toBe(`echo ${'x'.repeat(75)}… (전체 2줄)`)
+})
+
+test('keeps the start of a command output, and the deny reason or error', async () => {
+  const many = Array.from({ length: 30 }, (_, n) => `line ${n + 1}`).join('\n')
+  const kept = actionOf({ tool: 'Bash', command: 'seq' }, { result: { stdout: many, stderr: '' } })
+  expect(kept?.outputLines).toBe(30)
+  expect(kept?.output.split('\n').length).toBe(20)
+  expect(outputText(kept?.output ?? '', kept?.outputLines ?? 0)).toBe('line 1\nline 2\nline 3\nline 4\nline 5\n… (전체 30줄)')
+  expect(outputText('y'.repeat(130), 1)).toBe(`${'y'.repeat(120)}…`)
+  expect(actionOf({ tool: 'Bash', command: 'rm x' }, { deny: '거부함' })?.output).toBe('거부함')
+  expect(actionOf({ tool: 'Bash', command: 'false' }, { isError: true, text: 'Exit code 1' })?.output).toBe('Exit code 1')
+  expect(actionOf({ tool: 'Bash', command: 'true' }, { result: { stdout: '', stderr: '' } })?.outputLines).toBe(0)
+})
+
+test('asks Claude to write each Bash description as the purpose of the command', async ($, on) => {
+  on('prompt.compose', async () => ({ sections: [] }) as any)
+  const composed = await ($.prompt as any).compose({ model: 'm', promptModel: 'm', surfaces: [], tools: [], outputStyle: null, traits: [] } as any)
+  const rule = composed.sections.find((one: { id: string }) => one.id === 'blackbox-mods:commands')
+  expect(rule?.text).toContain('description 은 이 명령을 왜 실행하는지')
 })

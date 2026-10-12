@@ -33,7 +33,12 @@ const READ_RULE = [
 
 const PURPOSE_RULE = [
   'DB 쿼리(run_query.py, mysql)를 실행할 때는 SQL 문장마다 맨 앞에 `-- 조회 목적: <이 쿼리로 무엇을 왜 확인하는지 한 문장>` 주석을 붙인다.',
-  '사용자는 Blackbox 패널에서 이 주석을 쿼리 설명으로 읽는다. Bash 명령의 description 은 그 작업의 짧은 목표로 쓴다.',
+  '사용자는 Blackbox 패널에서 이 주석을 쿼리 설명으로 읽는다.',
+].join('\n')
+
+const COMMAND_RULE = [
+  '모든 Bash 명령의 description 은 이 명령을 왜 실행하는지(무엇을 확인하거나 바꾸려는지) 한국어 한 문장으로 쓴다. 명령을 그대로 옮기지 않는다.',
+  '사용자는 Blackbox 패널의 세션 로그에서 이 문장을 명령의 목적으로 읽는다.',
 ].join('\n')
 
 const turns = atom({ plugin: 'blackbox-mods', key: 'turns' } as const, [] as Turn[])
@@ -699,12 +704,31 @@ async function noteTool($: EngineInterface, e: { tool: string } & Record<string,
   if (isNew || e.tool === 'Bash') await refreshTree($)
 }
 
-const COMMAND_LINES = 3
+const COMMAND_WIDTH = 80
+const ACTION_OUTPUT_KEEP = 20
+const ACTION_OUTPUT_LINES = 5
+const ACTION_OUTPUT_WIDTH = 120
+
+type ActionRan = {
+  deny?: string
+  isError?: boolean
+  text?: unknown
+  result?: unknown
+}
+
+/** 도구 결과에서 사용자에게 보일 출력: 거부 이유, 오류 글, stdout·stderr */
+export function outputOf(ran: ActionRan): string {
+  if (ran.deny !== undefined) return ran.deny
+  const result = ran.result as { stdout?: unknown; stderr?: unknown } | undefined
+  const streams = [result?.stdout, result?.stderr].filter(one => typeof one === 'string' && one.trim()).join('\n')
+  if (ran.isError || !streams) return streams || String(ran.text ?? '')
+  return streams
+}
 
 /** 도구 호출 하나를 세션 로그 항목으로 바꾼다. 기록하지 않는 호출이면 undefined */
 export function actionOf(
   e: { tool: string; tool_use_id?: string } & Record<string, unknown>,
-  ran: { deny?: string; isError?: boolean },
+  ran: ActionRan,
 ): Omit<ActionEntry, 't' | 'at' | 'turn'> | undefined {
   const id = e.tool_use_id ?? `a${Date.now()}`
   const status: ActionEntry['status'] = ran.deny !== undefined ? 'denied' : ran.isError ? 'failed' : 'done'
@@ -712,22 +736,37 @@ export function actionOf(
     const command = typeof e.command === 'string' ? e.command.trim() : ''
     if (!command || QUERY_COMMAND.test(command)) return undefined
     const note = typeof e.description === 'string' ? e.description.trim() : ''
-    return { id, kind: 'command', target: command, note, status }
+    const lines = outputOf(ran).trimEnd().split('\n')
+    const output = lines.slice(0, ACTION_OUTPUT_KEEP).join('\n')
+    return { id, kind: 'command', target: command, note, status, output, outputLines: output ? lines.length : 0 }
   }
   if (!['Edit', 'Write', 'NotebookEdit'].includes(e.tool) || status !== 'done') return undefined
   const file = typeof e.file_path === 'string' ? e.file_path : typeof e.notebook_path === 'string' ? e.notebook_path : ''
   if (!file) return undefined
-  return { id, kind: 'file', target: file, note: e.tool === 'Write' ? '작성' : '수정', status }
+  return { id, kind: 'file', target: file, note: e.tool === 'Write' ? '작성' : '수정', status, output: '', outputLines: 0 }
 }
 
-/** 명령을 앞 몇 줄로 줄인다 */
+/** 명령을 첫 줄 앞부분으로 줄인다. 줄였으면 … 와 전체 줄 수를 붙인다 */
 export function commandText(command: string): string {
-  const lines = command.split('\n')
-  const shown = lines.slice(0, COMMAND_LINES).join('\n')
-  return lines.length > COMMAND_LINES ? `${shown}\n… (전체 ${lines.length}줄)` : shown
+  const lines = command.trim().split('\n')
+  const first = lines[0] ?? ''
+  const shown = first.length > COMMAND_WIDTH ? `${first.slice(0, COMMAND_WIDTH)}…` : first
+  if (lines.length > 1) return `${shown}${shown.endsWith('…') ? '' : ' …'} (전체 ${lines.length}줄)`
+  return shown
 }
 
-async function recordAction($: EngineInterface, e: { tool: string } & Record<string, unknown>, ran: { deny?: string; isError?: boolean }) {
+function indent(text: string): string {
+  return text.replace(/^/gm, '  ')
+}
+
+/** 출력을 앞 몇 줄, 줄마다 앞부분으로 줄인다 */
+export function outputText(output: string, total: number): string {
+  const lines = output.split('\n').slice(0, ACTION_OUTPUT_LINES)
+  const shown = lines.map(line => (line.length > ACTION_OUTPUT_WIDTH ? `${line.slice(0, ACTION_OUTPUT_WIDTH)}…` : line)).join('\n')
+  return total > ACTION_OUTPUT_LINES ? `${shown}\n… (전체 ${total}줄)` : shown
+}
+
+async function recordAction($: EngineInterface, e: { tool: string } & Record<string, unknown>, ran: ActionRan) {
   const action = actionOf(e, ran)
   if (!action) return
   const entry: ActionEntry = { ...action, t: Date.now(), at: timeNow(), turn: await currentTurn($) }
@@ -870,6 +909,7 @@ export const register: Register = (on, options) => {
       sections: [
         ...composed.sections,
         { id: 'blackbox-mods:purpose', text: PURPOSE_RULE, scope: 'session' as const },
+        { id: 'blackbox-mods:commands', text: COMMAND_RULE, scope: 'session' as const },
         { id: 'blackbox-mods:decisions', text: DECISION_RULE, scope: 'session' as const },
         { id: 'blackbox-mods:reads', text: READ_RULE, scope: 'session' as const },
       ],
@@ -1127,10 +1167,13 @@ export const register: Register = (on, options) => {
                     if (action.kind === 'file') {
                       return <Text>{`${action.note}: ${action.target}`}</Text>
                     }
+                    const output = action.output ?? ''
                     return (
-                      <Box flexDirection="column">
-                        <Text dimColor>{`명령${mark}${action.note ? `: ${action.note}` : ''}`}</Text>
-                        <Text>{`  $ ${commandText(action.target).replace(/\n/g, '\n    ')}`}</Text>
+                      <Box flexDirection="column" marginTop={1}>
+                        <Text>{`목적: ${action.note || '(설명 없음)'}`}</Text>
+                        <Text dimColor>{`$ ${commandText(action.target)}`}</Text>
+                        <Text>{`결과:${mark}${output ? '' : ' (출력 없음)'}`}</Text>
+                        {output !== '' && <Text dimColor>{indent(outputText(output, action.outputLines ?? 0))}</Text>}
                       </Box>
                     )
                   }
