@@ -31,6 +31,9 @@ const AGREEMENT_KIND_LABEL: Record<Agreement['kind'], string> = {
   format: '답 형식',
 }
 const AGREEMENT_MARK: Record<Agreement['status'], string> = { assumed: '[?]', confirmed: '[o]', revoked: '[-]' }
+/** 암묵적 합의 탭 맨 위의 설명 */
+const AGREEMENT_HELP =
+  '암묵적 합의: 아무도 묻지 않았지만 Claude 가 작업의 전제로 삼은 것(진행 전제, 범위, 용어, 작업 방식, 요청 해석, 답 형식)이다. 묻고 답한 것은 결정 사항 탭에 있다. 틀린 전제는 [아님] 으로 바로잡는다.'
 const STEP_MARK: Record<PlanStep['status'], string> = { todo: '[ ]', doing: '[>]', done: '[x]', skipped: '[-]' }
 const DECISION_RULE = [
   '사용자에게 결정을 맡기는 항목(진행 여부, 방법 선택, 이름, 범위 등)을 답변에 남길 때는 답변을 끝내기 전에 track_decisions 도구로 항목마다 status pending, decidedBy user 로 등록한다. 질문, 선택지, 권장안을 함께 보낸다.',
@@ -1585,6 +1588,7 @@ export const register: Register = (on, options) => {
         )}
         {current === 'agreements' && (
           <Box flexDirection="column">
+            <Text>{AGREEMENT_HELP}</Text>
             <Text dimColor>{`${assumedCount > 0 ? `확인 대기 ${assumedCount}건` : '확인 대기 없음'} · [?] 추정  [o] 맞음  [-] 아님`}</Text>
             {agreementGroups.length === 0 && <Text dimColor>아직 암묵적 합의가 없다.</Text>}
             {agreementGroups.map(group => (

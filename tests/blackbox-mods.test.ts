@@ -734,6 +734,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('[?] a1. (작업 방식) 등록 시 탭을 바꾸지 않는다')
     expect(pane).toContain('근거: 사용자가 이의 없이 진행')
+    expect(pane).toContain('암묵적 합의: 아무도 묻지 않았지만')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a1-no', surface } as any)
     await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a1-yes', surface } as any)
     expect(fills).toEqual(['a1: 아님', 'a1: 맞음'])
