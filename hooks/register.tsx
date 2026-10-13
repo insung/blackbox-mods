@@ -17,6 +17,8 @@ const PLAN_TOOL = 'show_plan'
 const DECISION_TOOL = 'track_decisions'
 const QUERY_COMMAND = /run_query\.py|(^|[\s;&|])mysql\s/
 const OUTPUT_LINES = 30
+/** 세션 로그 항목 머리의 색: 종류마다 다르게 해 항목끼리 구분한다 */
+const KIND_COLOR = { plan: 'planMode', read: 'suggestion', file: 'success', command: 'bashBorder', query: 'permission' } as const
 const STEP_MARK: Record<PlanStep['status'], string> = { todo: '[ ]', doing: '[>]', done: '[x]', skipped: '[-]' }
 const DECISION_RULE = [
   '사용자에게 결정을 맡기는 항목(진행 여부, 방법 선택, 이름, 범위 등)을 답변에 남길 때는 답변을 끝내기 전에 track_decisions 도구로 항목마다 status pending, decidedBy user 로 등록한다. 질문, 선택지, 권장안을 함께 보낸다.',
@@ -56,6 +58,7 @@ const skillsAt = atom({ plugin: 'blackbox-mods', key: 'skillsAt' } as const, '')
 const decisions = atom({ plugin: 'blackbox-mods', key: 'decisions' } as const, [] as Decision[])
 const lastPrompt = atom({ plugin: 'blackbox-mods', key: 'lastPrompt' } as const, '')
 const tab = atom({ plugin: 'blackbox-mods', key: 'tab' } as const, 'log' as TabId)
+const logPage = atom({ plugin: 'blackbox-mods', key: 'logPage' } as const, '')
 let githubUser = ''
 
 type Found = { owner: string; repo: string; number: number; isPull?: boolean; action?: string }
@@ -539,6 +542,18 @@ export function planDiagram(steps: PlanStep[], width: number): string {
   return lines.join('\n')
 }
 
+/** 보는 묶음의 위치. 고른 묶음이 없거나 사라졌으면 마지막 묶음이다 */
+export function pageIndex(keys: string[], selected: string): number {
+  const at = selected ? keys.indexOf(selected) : -1
+  return at >= 0 ? at : Math.max(0, keys.length - 1)
+}
+
+/** Prev·Next 로 옮긴 뒤 저장할 key. 마지막 묶음에 닿으면 빈 값으로 두어 새 요청을 따라가게 한다 */
+export function movePage(keys: string[], selected: string, step: number): string {
+  const at = Math.min(keys.length - 1, Math.max(0, pageIndex(keys, selected) + step))
+  return at < 0 || at === keys.length - 1 ? '' : (keys[at] ?? '')
+}
+
 async function recordRead($: EngineInterface, file: string): Promise<void> {
   const turn = await currentTurn($)
   await update($, reads, list => {
@@ -704,7 +719,8 @@ async function noteTool($: EngineInterface, e: { tool: string } & Record<string,
   if (isNew || e.tool === 'Bash') await refreshTree($)
 }
 
-const COMMAND_WIDTH = 80
+const COMMAND_WIDTH = 120
+const COMMAND_LINES = 8
 const ACTION_OUTPUT_KEEP = 20
 const ACTION_OUTPUT_LINES = 5
 const ACTION_OUTPUT_WIDTH = 120
@@ -746,17 +762,11 @@ export function actionOf(
   return { id, kind: 'file', target: file, note: e.tool === 'Write' ? '작성' : '수정', status, output: '', outputLines: 0 }
 }
 
-/** 명령을 첫 줄 앞부분으로 줄인다. 줄였으면 … 와 전체 줄 수를 붙인다 */
+/** 명령을 앞 몇 줄, 줄마다 앞부분으로 줄인다. 줄였으면 전체 줄 수를 bash 주석으로 붙인다 */
 export function commandText(command: string): string {
   const lines = command.trim().split('\n')
-  const first = lines[0] ?? ''
-  const shown = first.length > COMMAND_WIDTH ? `${first.slice(0, COMMAND_WIDTH)}…` : first
-  if (lines.length > 1) return `${shown}${shown.endsWith('…') ? '' : ' …'} (전체 ${lines.length}줄)`
-  return shown
-}
-
-function indent(text: string): string {
-  return text.replace(/^/gm, '  ')
+  const shown = lines.slice(0, COMMAND_LINES).map(line => (line.length > COMMAND_WIDTH ? `${line.slice(0, COMMAND_WIDTH)}…` : line))
+  return lines.length > COMMAND_LINES ? `${shown.join('\n')}\n# … (전체 ${lines.length}줄)` : shown.join('\n')
 }
 
 /** 출력을 앞 몇 줄, 줄마다 앞부분으로 줄인다 */
@@ -1084,11 +1094,17 @@ export const register: Register = (on, options) => {
     ].sort((x, y) => x.t - y.t)
     const logGroups: { key: string; title: string; items: typeof entries }[] = []
     for (const item of entries) {
-      const key = item.turn > 0 ? `turn-${item.turn}` : `t-${item.t}`
+      // 요청 기록 전의 항목(turn 0)은 한 묶음으로 모은다
+      const key = `turn-${item.turn}`
       const last = logGroups.at(-1)
       if (last && last.key === key) last.items.push(item)
       else logGroups.push({ key, title: titleOf(item.turn, item.at), items: [item] })
     }
+    const logKeys = logGroups.map(group => group.key)
+    const selectedPage = await read($, logPage)
+    const page = pageIndex(logKeys, selectedPage)
+    const shownGroups = logGroups.slice(page, page + 1)
+    const turnPage = (step: number) => update($, logPage, current => movePage(logKeys, current, step))
     const decisionGroups: { turn: number; title: string; items: Decision[] }[] = []
     for (const one of allDecisions) {
       const group = decisionGroups.find(g => g.turn === (one.turn ?? 0) && (one.turn ?? 0) > 0)
@@ -1135,14 +1151,34 @@ export const register: Register = (on, options) => {
         {current === 'log' && (
           <Box flexDirection="column">
             {logGroups.length === 0 && <Text dimColor>아직 기록이 없다.</Text>}
-            {logGroups.map(group => (
+            {logGroups.length > 0 && (
+              <Box flexDirection="row" marginBottom={1}>
+                <Button key="log-prev" label="◀ Prev" dimColor={page === 0} onPress={() => turnPage(-1)} />
+                <Text bold>{`  ${page + 1} / ${logGroups.length}  `}</Text>
+                <Button key="log-next" label="Next ▶" dimColor={page === logGroups.length - 1} onPress={() => turnPage(1)} />
+              </Box>
+            )}
+            {shownGroups.map(group => (
               <Box flexDirection="column" marginBottom={1}>
                 <Text bold color="claude">{separator(group.title, width)}</Text>
                 {group.items.map(item => {
+                  const head = (name: string, color: string) => (
+                    <Box flexDirection="row" marginTop={1}>
+                      <Text bold color={color}>{`▌ ${name}`}</Text>
+                      <Text dimColor>{`  ${item.at}`}</Text>
+                    </Box>
+                  )
+                  const field = (name: string, value: string, isMissing = false) => (
+                    <Box flexDirection="row">
+                      <Text bold italic>{`${name}: `}</Text>
+                      <Text dimColor={isMissing}>{value}</Text>
+                    </Box>
+                  )
                   if (item.kind === 'plan') {
                     return (
-                      <Box flexDirection="column" marginTop={1}>
-                        <Text>{`계획: ${item.plan.goal}`}</Text>
+                      <Box flexDirection="column">
+                        {head('계획', KIND_COLOR.plan)}
+                        {field('목표', item.plan.goal)}
                         <Text bold>{planDiagram(item.plan.steps, width)}</Text>
                         <Text dimColor>{planText(item.plan)}</Text>
                       </Box>
@@ -1151,13 +1187,14 @@ export const register: Register = (on, options) => {
                   if (item.kind === 'read') {
                     const entry = item.entry
                     return (
-                      <Box flexDirection="column" marginTop={1}>
-                        {entry.purpose ? <Text>{`목적: ${entry.purpose}`}</Text> : <Text dimColor>목적: (Claude 가 아직 정리하지 않음)</Text>}
-                        {entry.files.length > 0 && <Text>읽은 파일:</Text>}
+                      <Box flexDirection="column">
+                        {head('파일 읽기', KIND_COLOR.read)}
+                        {field('목적', entry.purpose || '(Claude 가 아직 정리하지 않음)', !entry.purpose)}
+                        {entry.files.length > 0 && <Text bold italic>읽은 파일:</Text>}
                         {entry.files.map(file => (
-                          <Text dimColor>{`  ${file}`}</Text>
+                          <Text color={KIND_COLOR.read}>{`  ${file}`}</Text>
                         ))}
-                        {entry.result ? <Text>{`결과: ${entry.result}`}</Text> : <Text dimColor>결과: (Claude 가 아직 정리하지 않음)</Text>}
+                        {field('결과', entry.result || '(Claude 가 아직 정리하지 않음)', !entry.result)}
                       </Box>
                     )
                   }
@@ -1165,15 +1202,22 @@ export const register: Register = (on, options) => {
                     const action = item.action
                     const mark = action.status === 'failed' ? ' (실패)' : action.status === 'denied' ? ' (거부됨)' : ''
                     if (action.kind === 'file') {
-                      return <Text>{`${action.note}: ${action.target}`}</Text>
+                      return (
+                        <Box flexDirection="column">
+                          {head(`파일 ${action.note}`, KIND_COLOR.file)}
+                          <Text color={KIND_COLOR.file}>{`  ${action.target}`}</Text>
+                        </Box>
+                      )
                     }
                     const output = action.output ?? ''
                     return (
-                      <Box flexDirection="column" marginTop={1}>
-                        <Text>{`목적: ${action.note || '(설명 없음)'}`}</Text>
-                        <Text dimColor>{`$ ${commandText(action.target)}`}</Text>
-                        <Text>{`결과:${mark}${output ? '' : ' (출력 없음)'}`}</Text>
-                        {output !== '' && <Text dimColor>{indent(outputText(output, action.outputLines ?? 0))}</Text>}
+                      <Box flexDirection="column">
+                        {head('명령', KIND_COLOR.command)}
+                        {field('목적', action.note || '(설명 없음)', !action.note)}
+                        <Text bold italic>실행:</Text>
+                        <Code source={commandText(action.target)} language="bash" />
+                        <Text bold italic color={action.status === 'done' ? undefined : 'error'}>{`결과:${mark}${output ? '' : ' (출력 없음)'}`}</Text>
+                        {output !== '' && <Code source={outputText(output, action.outputLines ?? 0)} language="text" />}
                       </Box>
                     )
                   }
@@ -1181,11 +1225,15 @@ export const register: Register = (on, options) => {
                   const lines = run.output.split('\n')
                   const isCut = lines.length > OUTPUT_LINES
                   return (
-                    <Box flexDirection="column" marginTop={1}>
-                      <Text>{`목적: ${run.purpose || run.goal}`}</Text>
-                      <Text>{`쿼리: (DB ${run.database} · 테이블 ${run.tables})`}</Text>
+                    <Box flexDirection="column">
+                      {head('쿼리', KIND_COLOR.query)}
+                      {field('목적', run.purpose || run.goal)}
+                      {field('대상', `DB ${run.database} · 테이블 ${run.tables}`)}
+                      <Text bold italic>실행:</Text>
                       <Code source={run.sql} language="sql" />
-                      <Text>{`결과:${run.status === 'failed' ? ' (실패)' : run.status === 'denied' ? ' (거부됨)' : ''}`}</Text>
+                      <Text bold italic color={run.status === 'failed' || run.status === 'denied' ? 'error' : undefined}>
+                        {`결과:${run.status === 'failed' ? ' (실패)' : run.status === 'denied' ? ' (거부됨)' : ''}`}
+                      </Text>
                       {run.status === 'running' ? (
                         <Text dimColor>실행 중…</Text>
                       ) : (
