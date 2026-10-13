@@ -1,6 +1,6 @@
 {
   "name": "blackbox-mods",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Claude 가 실행한 DB 쿼리·결과, 실행한 명령, 읽고 바꾼 파일, 작업 계획, 결정 사항, 관련 GitHub 이슈·PR, 사용 중인 워크트리, 스킬 사용량을 한 패널의 탭으로 보여준다",
   "author": {
     "name": "insung"
