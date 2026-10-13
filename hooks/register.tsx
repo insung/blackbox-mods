@@ -148,23 +148,110 @@ export function collectIssues(
 const GIT_COMMIT = /\bgit\s+(?:-C\s+\S+\s+)?commit\b/
 const COMMIT_LINE = /^\[([^\s\]]+)(?: \([\w-]+\))? ([0-9a-f]{7,40})\] (.+)$/gm
 
-/** git commit 출력 `[branch sha] 제목` 에서 커밋을 꺼낸다. 메시지의 #N 은 명령 전체(-m, heredoc)에서 찾는다 */
-export function commitsInRun(command: string, resultText: string, order: number): SessionCommit[] {
-  if (!GIT_COMMIT.test(executedPart(command))) return []
-  const refs = [...new Set([...command.matchAll(/(?<![\w&/])#(\d+)\b/g)].map(m => Number(m[1])))].filter(n => n > 0)
-  return [...resultText.matchAll(COMMIT_LINE)].map(m => ({ sha: m[2] ?? '', branch: m[1] ?? '', subject: (m[3] ?? '').trim(), refs, order }))
+/** 커밋 명령이 남긴 메시지: `-F -` heredoc 본문, 아니면 `-m`·`--message` 인자들. 같은 줄의 다른 명령(&&, ;, |)은 읽지 않는다 */
+export function commitMessageOf(command: string): string {
+  const at = command.search(GIT_COMMIT)
+  if (at < 0) return ''
+  const rest = command.slice(at)
+  const heredoc = rest.match(/^[^\n]*?(?:-F\s*-|--file[=\s]+-)(?=\s|$)[^\n]*?<<-?\s*(['"]?)(\w+)\1[^\n]*\n([\s\S]*?)\n\s*\2(?=\s|$)/)
+  if (heredoc) return (heredoc[3] ?? '').trim()
+  const parts: string[] = []
+  let isMessageNext = false
+  for (const m of rest.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'|(&&|\|\||[;|\n])|([^\s"';|&]+)/g)) {
+    if (m[3]) break
+    const value = m[1] !== undefined ? m[1].replace(/\\(.)/g, '$1') : (m[2] ?? m[4] ?? '')
+    if (isMessageNext) {
+      parts.push(value)
+      isMessageNext = false
+    } else if (m[4] === '-m' || m[4] === '--message') {
+      isMessageNext = true
+    } else if (m[4]?.startsWith('--message=')) {
+      parts.push(m[4].slice('--message='.length))
+    }
+  }
+  return parts.join('\n\n').trim()
 }
 
-/** 세션의 Bash 호출에서 커밋을 모은다. amend·rebase 로 같은 브랜치에 같은 제목이 다시 나오면 마지막 것만 남긴다 */
-export function collectCommits(messages: readonly TranscriptMessage[]): SessionCommit[] {
-  const found: SessionCommit[] = []
+/** 메시지의 이슈·PR 번호 (#N, Refs: #N) */
+export function refsOfMessage(message: string): number[] {
+  return [...new Set([...message.matchAll(/(?<![\w&/])#(\d+)\b/g)].map(m => Number(m[1])))].filter(n => n > 0)
+}
+
+export type CommitCandidate = SessionCommit & { command: string }
+
+/** Bash 호출 하나에서 커밋 후보를 꺼낸다. 출력의 `[branch sha] 제목` 이 없으면(-q 등) 메시지 첫 줄을 제목으로 두고 SHA 는 git 에서 찾는다 */
+export function commitsInRun(command: string, resultText: string, order: number): CommitCandidate[] {
+  if (!GIT_COMMIT.test(executedPart(command))) return []
+  const message = commitMessageOf(command)
+  const refs = refsOfMessage(message)
+  const lines = [...resultText.matchAll(COMMIT_LINE)].map(m => ({ sha: m[2] ?? '', branch: m[1] ?? '', subject: (m[3] ?? '').trim(), refs, order, command }))
+  if (lines.length > 0) return lines
+  const subject = message.split('\n')[0]?.trim() ?? ''
+  return subject ? [{ sha: '', branch: '', subject, refs, order, command }] : []
+}
+
+/** 세션의 Bash 호출에서 커밋 후보를 모은다 */
+export function collectCommits(messages: readonly TranscriptMessage[]): CommitCandidate[] {
+  const found: CommitCandidate[] = []
   messages.forEach((message, order) => {
     for (const use of message.toolUses ?? []) {
       if (use.tool !== 'Bash' || typeof use.input.command !== 'string') continue
       found.push(...commitsInRun(use.input.command, use.text ?? '', order))
     }
   })
-  return found.filter((one, index) => !found.slice(index + 1).some(later => later.branch === one.branch && later.subject === one.subject))
+  return found
+}
+
+/** 같은 커밋이 두 번 나오거나, amend·rebase 로 같은 브랜치에 같은 제목이 다시 나오면 마지막 것만 남긴다 */
+export function dedupeCommits(list: SessionCommit[]): SessionCommit[] {
+  return list.filter(
+    (one, index) => !list.slice(index + 1).some(later => later.sha === one.sha || (later.branch === one.branch && later.subject === one.subject)),
+  )
+}
+
+/** LOOKUP_COMMIT 의 출력(짧은 SHA, 커밋을 담은 브랜치들, 메시지)을 읽는다. 브랜치를 이미 알면 그대로 쓰고, 아니면 main·master 밖의 브랜치를 고른다 */
+export function parseCommitLookup(output: string, knownBranch: string): { sha: string; branch: string; refs: number[] } | undefined {
+  const [sha = '', branchLine = '', ...body] = output.split('\n')
+  if (!/^[0-9a-f]{7,40}$/.test(sha.trim())) return undefined
+  const branches = branchLine.split(/\s+/).filter(Boolean)
+  const branch = knownBranch || branches.find(name => !/^(main|master)$/.test(name)) || branches[0] || ''
+  return { sha: sha.trim(), branch, refs: refsOfMessage(body.join('\n')) }
+}
+
+/** $1 디렉토리에서 커밋을 찾는다. $2 SHA 가 없으면 $3 제목과 같은 최근 커밋을 쓴다 */
+const LOOKUP_COMMIT = [
+  'cd "$1" 2>/dev/null || exit 1',
+  's="$2"',
+  'if [ -z "$s" ]; then s=$(git log --all -n 200 --format=\'%h%x09%s\' | T="$3" awk -F\'\\t\' \'$2 == ENVIRON["T"] { print $1; exit }\'); fi',
+  '[ -n "$s" ] || exit 1',
+  'git rev-parse --short "$s" || exit 1',
+  'git branch --contains "$s" --format=\'%(refname:short)\' | tr \'\\n\' \' \'; echo',
+  'git show -s --format=%B "$s"',
+].join('\n')
+
+/** 명령의 cd 와 git -C 를 차례로 따라가 커밋한 디렉토리를 정한다 */
+async function commitDirOf($: EngineInterface, command: string, cwd: string): Promise<string> {
+  let dir = cwd
+  for (const target of cdTargetsOf(command)) dir = (await resolveDir($, target, dir).catch(() => undefined)) ?? dir
+  const gitDir = command.match(/\bgit\s+-C\s+(["']?)([^"'\s]+)\1\s+commit\b/)?.[2]
+  if (gitDir) dir = (await resolveDir($, gitDir, dir).catch(() => undefined)) ?? dir
+  return dir
+}
+
+/** 후보마다 git 으로 SHA·브랜치·메시지 번호를 확인한다. git 에서 찾지 못하고 SHA 도 없으면 뺀다 */
+async function resolveCommits($: EngineInterface, candidates: CommitCandidate[]): Promise<SessionCommit[]> {
+  const cwd = await $.session.cwd().catch(() => '')
+  const resolved: SessionCommit[] = []
+  for (const { command, ...one } of candidates) {
+    const dir = await commitDirOf($, command, cwd)
+    const ran = await $.process
+      .run(['sh', '-c', LOOKUP_COMMIT, 'sh', dir, one.sha, one.subject], { timeoutMs: 10000 })
+      .catch(() => ({ exitCode: 1, stdout: '', stderr: '' }))
+    const found = ran.exitCode === 0 ? parseCommitLookup(ran.stdout, one.branch) : undefined
+    if (found) resolved.push({ ...one, ...found, refs: found.refs.length > 0 ? found.refs : one.refs })
+    else if (one.sha) resolved.push(one)
+  }
+  return dedupeCommits(resolved)
 }
 
 /** 커밋을 이슈·PR 에 잇는다: 메시지의 번호, 다음으로 PR head 브랜치. 잇지 못한 커밋은 unlinked */
@@ -474,8 +561,9 @@ async function refreshIssues($: EngineInterface): Promise<void> {
   const messages = await $.session.messages()
   const list = collectIssues(Array.isArray(messages) ? messages : [])
   await update($, issues, () => list)
-  await update($, commits, () => collectCommits(Array.isArray(messages) ? messages : []))
   await update($, issuesAt, () => timeNow())
+  const found = await resolveCommits($, collectCommits(Array.isArray(messages) ? messages : [])).catch(() => undefined)
+  if (found) await update($, commits, () => found)
   for (const ref of list) {
     const meta = await fetchMeta($, ref).catch(() => ({ error: '읽지 못함' }) as IssueMeta)
     await update($, issueMeta, all => ({ ...all, [ref.key]: meta }))

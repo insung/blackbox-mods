@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { ActionEntry, Plan, QueryRun } from '../types'
-import { actionOf, collectCommits, commitsInRun, linkCommits, commandText, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
+import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
@@ -169,11 +169,16 @@ for (const surface of ['terminal', 'desktop'] as const) {
             { tool: 'Bash', input: { command: "git commit -m 'fix: 9번 수정' -m 'Refs: #9'" }, text: '[fix/9 1a2b3c4] fix: 9번 수정\n 1 file changed' },
             { tool: 'Bash', input: { command: "git commit -m 'docs: 문서 보완'" }, text: '[docs/o-rk-a-rk-reverse-engineering 5d6e7f8] docs: 문서 보완' },
             { tool: 'Bash', input: { command: "git commit -m 'chore: 정리'" }, text: '[main 9a8b7c6] chore: 정리' },
+            { tool: 'Bash', input: { command: "git commit -q -m 'fix: 조용히'" }, text: '' },
           ],
         },
       ],
     }) as any)
     on('process.run', async (_$: unknown, e: any) => {
+      if (String(e.argv[2] ?? '').includes('rev-parse')) {
+        // 출력에 [branch sha] 가 없는 -q 커밋만 git 에서 찾는다
+        return { value: { exitCode: e.argv[6] === 'fix: 조용히' ? 0 : 1, stdout: '7c7c7c7\nmain fix/9 \nfix: 조용히\n\nRefs: #9\n', stderr: '' } } as any
+      }
       const number = e.argv.at(-1)
       const stdout =
         number === '35'
@@ -193,6 +198,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(pane.indexOf('#35')).toBeLessThan(pane.indexOf('5d6e7f8'))
     expect(pane.indexOf('5d6e7f8')).toBeLessThan(pane.indexOf('제목 9'))
     expect(pane.indexOf('제목 9')).toBeLessThan(pane.indexOf('1a2b3c4'))
+    expect(pane.indexOf('제목 9')).toBeLessThan(pane.indexOf('7c7c7c7'))
+    expect(pane.indexOf('7c7c7c7')).toBeLessThan(pane.indexOf('이슈 없는 커밋'))
     expect(pane).toContain('이슈 없는 커밋  1건')
     expect(pane.indexOf('이슈 없는 커밋')).toBeLessThan(pane.indexOf('9a8b7c6'))
     expect(pane).toContain('⎇ 머지됨')
@@ -207,21 +214,38 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
+test('reads the commit message from -m and heredoc, not from other commands on the line', async () => {
+  const heredoc = "git add -A && git commit -q -F - <<'EOF'\nfeat(x): 기능\n\n본문에 # 문자\n\nRefs: #10\nEOF\ngit log --oneline -1"
+  expect(commitMessageOf(heredoc)).toBe('feat(x): 기능\n\n본문에 # 문자\n\nRefs: #10')
+  expect(commitMessageOf(`git commit -m "a \\"q\\"" -m 'Refs: #3'`)).toBe('a "q"\n\nRefs: #3')
+  expect(commitMessageOf('git commit --message=one && gh pr create --body "Closes #12"')).toBe('one')
+  expect(commitMessageOf('git commit -m "a" && gh pr create --body "Closes #12"')).toBe('a')
+})
+
 test('reads commits that a Bash call made, with the numbers in the message', async () => {
-  const heredoc = "git add -A && git commit -q -F - <<'EOF'\nfeat(x): 기능\n\n본문에 # 문자\n\nRefs: #10\nEOF"
+  const heredoc = "git add -A && git commit -F - <<'EOF'\nfeat(x): 기능\n\nRefs: #10\nEOF"
   expect(commitsInRun(heredoc, '[feat/10-x 041d59b] feat(x): 기능', 3)).toEqual([
-    { sha: '041d59b', branch: 'feat/10-x', subject: 'feat(x): 기능', refs: [10], order: 3 },
+    { sha: '041d59b', branch: 'feat/10-x', subject: 'feat(x): 기능', refs: [10], order: 3, command: heredoc },
   ])
   expect(commitsInRun('git commit -m "init"', '[main (root-commit) abc1234] init', 0)[0]).toMatchObject({ sha: 'abc1234', branch: 'main', refs: [] })
   expect(commitsInRun('git -C /r commit -m "a #3"', '[b 1111111] a #3', 0)[0]?.refs).toEqual([3])
+  expect(commitsInRun('git commit -m "a" && gh pr create --body "Closes #12"', '[b 1111111] a', 0)[0]?.refs).toEqual([])
   expect(commitsInRun('echo "git commit"', '[b 1111111] a', 0)).toEqual([])
   expect(commitsInRun('git log --oneline', '[b 1111111] a', 0)).toEqual([])
 })
 
+test('keeps a quiet commit by its subject so git can find its SHA', async () => {
+  const quiet = "git commit -q -F - <<'EOF'\nfix: 조용한 커밋\n\nRefs: #11\nEOF\ngit log --oneline -1"
+  expect(commitsInRun(quiet, 'abc1234 fix: 조용한 커밋', 0)).toEqual([{ sha: '', branch: '', subject: 'fix: 조용한 커밋', refs: [11], order: 0, command: quiet }])
+  expect(parseCommitLookup('abc1234\nmain feat/11-x \nfix: 조용한 커밋\n\nRefs: #11\n', '')).toEqual({ sha: 'abc1234', branch: 'feat/11-x', refs: [11] })
+  expect(parseCommitLookup('abc1234\nmain \nx\n', 'b')).toEqual({ sha: 'abc1234', branch: 'b', refs: [] })
+  expect(parseCommitLookup('fatal: not a git repository', '')).toBe(undefined)
+})
+
 test('keeps the last commit when amend repeats the subject on a branch', async () => {
-  const run = (text: string) => ({ role: 'assistant', text: '', toolUses: [{ tool: 'Bash', input: { command: 'git commit --amend --no-edit' }, text }] })
-  const list = collectCommits([run('[b 1111111] same'), run('[b 2222222] same'), run('[c 3333333] same')])
-  expect(list.map(one => one.sha)).toEqual(['2222222', '3333333'])
+  const one = (sha: string, branch: string) => ({ sha, branch, subject: 'same', refs: [], order: 0 })
+  expect(dedupeCommits([one('1111111', 'b'), one('2222222', 'b'), one('3333333', 'c'), one('3333333', 'c')]).map(c => c.sha)).toEqual(['2222222', '3333333'])
+  expect(collectCommits([{ role: 'assistant', text: '', toolUses: [{ tool: 'Bash', input: { command: 'git commit --amend --no-edit' }, text: '[b 1111111] same' }] }]).length).toBe(1)
 })
 
 test('links commits by number first, then by the PR head branch', async () => {
