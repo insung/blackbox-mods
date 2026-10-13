@@ -199,6 +199,8 @@ declare module 'claude-code' {
       skillHits: SkillHit[]
       skillsAt: string
       tab: TabId
+      /** 세션 로그에서 보는 요청 묶음의 key. 빈 값이면 마지막 묶음을 따라간다 */
+      logPage: string
       decisions: Decision[]
       lastPrompt: string
     }

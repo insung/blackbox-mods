@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { ActionEntry, Plan, QueryRun } from '../types'
-import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
+import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
@@ -426,16 +426,22 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('카카오톡 DAU 조회')
     expect(pane.match(/── \[/g)?.length).toBe(1)
-    expect(pane).toContain('목적: 배치 폴더 확인')
-    expect(pane).toContain('$ ls batch')
-    expect(pane).toContain('  | a |\\n  |---|\\n  | 1 |')
-    expect(pane).toContain('수정: /Users/b/mi/a.py')
+    expect(pane).toContain('"목적: "]},{"type":"Text","props":{"dimColor":false},"children":["배치 폴더 확인"]')
+    expect(pane).toContain('▌ 명령')
+    expect(pane).toContain('"실행:"')
+    expect(pane).toContain('{"source":"ls batch","language":"bash"}')
+    expect(pane).toContain('{"source":"| a |\\n|---|\\n| 1 |","language":"text"}')
+    expect(pane).toContain('▌ 파일 수정')
+    expect(pane).toContain('  /Users/b/mi/a.py')
+    expect(pane).toContain('▌ 쿼리')
+    expect(pane).toContain('▌ 파일 읽기')
+    expect(pane).toContain('"bold":true,"italic":true},"children":["목적: "]')
     expect(pane).not.toContain('run_query.py')
-    expect(pane).toContain('목적: 날짜별 OS별 사용자수')
+    expect(pane).toContain('"children":["날짜별 OS별 사용자수"]')
     expect(pane).toContain('SELECT a FROM t')
     expect(pane).toContain('읽은 파일:')
     expect(pane).toContain('/Users/b/mi/.worktree/x/README.md')
-    expect(pane).toContain('결과: 기준일이 -2일로 바뀌었다')
+    expect(pane).toContain('"children":["기준일이 -2일로 바뀌었다"]')
     expect(pane).not.toContain('결정 대기')
   })
 }
@@ -524,6 +530,76 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
+test('moves between request pages and follows the latest at the end', async () => {
+  const keys = ['turn-1', 'turn-2', 'turn-3']
+  expect(pageIndex(keys, '')).toBe(2)
+  expect(pageIndex(keys, 'turn-1')).toBe(0)
+  expect(pageIndex(keys, 'gone')).toBe(2)
+  expect(pageIndex([], '')).toBe(0)
+  expect(movePage(keys, '', -1)).toBe('turn-2')
+  expect(movePage(keys, 'turn-1', -1)).toBe('turn-1')
+  expect(movePage(keys, 'turn-2', 1)).toBe('')
+  expect(movePage(keys, '', 1)).toBe('')
+  expect(movePage([], '', 1)).toBe('')
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`pages the session log one request at a time on ${surface}`, async ($, on) => {
+    answerTools(on)
+    on('model.complete', async () => ({ value: { isAnswered: false, text: '', usage: {} } }) as any)
+    on('prompt.submit', async (_$: unknown, e: any) => ({ text: e.text }) as any)
+    const render = async () => JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    await $.prompt.submit({ text: '첫 요청' } as any).catch(() => undefined)
+    await ($.tool.call as any)({ tool: 'Bash', description: '첫 명령', command: 'ls one' } as any)
+    await $.prompt.submit({ text: '둘째 요청' } as any).catch(() => undefined)
+    await ($.tool.call as any)({ tool: 'Bash', description: '둘째 명령', command: 'ls two' } as any)
+    let pane = await render()
+    expect(pane).toContain('  2 / 2  ')
+    expect(pane).toContain('ls two')
+    expect(pane).not.toContain('ls one')
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'log-prev', surface } as any)
+    pane = await render()
+    expect(pane).toContain('  1 / 2  ')
+    expect(pane).toContain('ls one')
+    expect(pane).not.toContain('ls two')
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'log-prev', surface } as any)
+    expect(await render()).toContain('  1 / 2  ')
+    await $.prompt.submit({ text: '셋째 요청' } as any).catch(() => undefined)
+    await ($.tool.call as any)({ tool: 'Bash', description: '셋째 명령', command: 'ls three' } as any)
+    pane = await render()
+    expect(pane).toContain('  1 / 3  ')
+    expect(pane).toContain('ls one')
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'log-next', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'log-next', surface } as any)
+    expect(await render()).toContain('ls three')
+    await $.prompt.submit({ text: '넷째 요청' } as any).catch(() => undefined)
+    await ($.tool.call as any)({ tool: 'Bash', description: '넷째 명령', command: 'ls four' } as any)
+    pane = await render()
+    expect(pane).toContain('  4 / 4  ')
+    expect(pane).toContain('ls four')
+  })
+}
+
+test('removes control characters that a surface cannot draw', async () => {
+  expect(plainText('\x1b[31mred\x1b[0m ok')).toBe('red ok')
+  expect(plainText('a\r\nb')).toBe('a\nb')
+  expect(plainText('10%\r50%\r100%\ndone')).toBe('100%\ndone')
+  expect(plainText('\x1b]8;;https://x\x07link\x1b]8;;\x07 bell\x07')).toBe('link bell')
+  expect(plainText('tab\tkept')).toBe('tab\tkept')
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`draws the log when a command prints colors on ${surface}`, async ($, on) => {
+    on('tool.call', async () => ({ result: { stdout: '\x1b[31mred\x1b[0m\r\nok\x07', stderr: '', interrupted: false } }) as any)
+    on('process.run', async () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }) as any)
+    on('session.cwd', async () => ({ value: '/tmp' }) as any)
+    await ($.tool.call as any)({ tool: 'Bash', description: '색 출력', command: 'ls --color' } as any)
+    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(pane).toContain('▌ 명령')
+    expect(pane).toContain('{"source":"red\\nok","language":"text"}')
+  })
+}
+
 test('records a Bash command that runs no query, with its goal and status', async ($, on) => {
   const seen = watch(on)
   answerTools(on)
@@ -558,11 +634,12 @@ test('marks failed and denied commands, and skips files a call did not change', 
   expect(actionOf({ tool: 'Read', file_path: '/tmp/a' }, {})).toBe(undefined)
 })
 
-test('shortens a long command to the start of its first line', async () => {
+test('keeps the first lines of a command, each cut to its start', async () => {
   expect(commandText('ls -la')).toBe('ls -la')
-  expect(commandText('a\nb\nc\nd')).toBe('a … (전체 4줄)')
-  expect(commandText(`echo ${'x'.repeat(100)}`)).toBe(`echo ${'x'.repeat(75)}…`)
-  expect(commandText(`echo ${'x'.repeat(100)}\nls`)).toBe(`echo ${'x'.repeat(75)}… (전체 2줄)`)
+  expect(commandText('a\nb\nc\nd')).toBe('a\nb\nc\nd')
+  expect(commandText(`echo ${'x'.repeat(150)}`)).toBe(`echo ${'x'.repeat(115)}…`)
+  const long = Array.from({ length: 10 }, (_, n) => `echo ${n + 1}`).join('\n')
+  expect(commandText(long)).toBe(`${long.split('\n').slice(0, 8).join('\n')}\n# … (전체 10줄)`)
 })
 
 test('keeps the start of a command output, and the deny reason or error', async () => {
