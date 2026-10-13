@@ -10,7 +10,7 @@ Open it with `/blackbox-mods`. The panel text is in Korean. The panel has five t
 | --- | --- |
 | Session log | One separator per request (time + one-line summary). Under it: database queries (purpose, SQL, result table), files Claude read (purpose, full paths, conclusion), files Claude changed with Edit·Write·NotebookEdit (written or edited, full path), other Bash commands (purpose from the Bash description, up to 8 lines of the command highlighted as bash, the first lines of its output, failed or denied), and work plans as an ASCII flow. Each entry starts with a coloured header that names its kind (plan, file read, file change, command, query), and field names such as purpose, run and result are bold italic. One request is shown at a time; `◀ Prev` and `Next ▶` turn the pages, `current / total` counts requests, and the last page follows new requests |
 | Decisions | Items you must decide (`[ ]`) and items Claude decided itself (`[x] … (Claude 가 정함)`), grouped by request. When an item is decided, the same line shows `=> result` and `-> your answer`. Option buttons put `d1: option` in the prompt box; you send it |
-| GitHub | Issues and PRs handled in this session, in the same order as the app's PR chip: state · #number · repository · branch · +additions −deletions · CI |
+| Git | Issues and PRs handled in this session, in the same order as the app's PR chip: state · #number · repository · branch · +additions −deletions · CI. Commits made with Bash in this session (short SHA · subject; a commit made with `-q` is found in git by its subject) appear under the issue or PR they belong to, matched by `#N` in the message or by the PR's head branch; the rest are listed under "Commits without an issue" (이슈 없는 커밋) |
 | Worktrees | Git worktrees this session uses, as a tree per repository, with an "Open in VS Code" button on each worktree in use |
 | Skill usage | Skill runs grouped by plugin, custom skills, and built-in skills, with counts, shares, and an excerpt of the request that triggered each run |
 
@@ -56,7 +56,7 @@ Automatic records (no tool call needed): Bash commands that run `run_query.py` o
 
 | Call | When | What is sent |
 | --- | --- | --- |
-| `gh api`, `gh pr view`, `gh issue view` | When the GitHub tab is opened or refreshed, and at the end of each turn | Repository and issue number of each reference |
+| `gh api`, `gh pr view`, `gh issue view` | When the Git tab is opened or refreshed, and at the end of each turn | Repository and issue number of each reference |
 | Model summary (`haiku`, through your Claude Code session) | When you send a request longer than 30 characters | The first 4,000 characters of the request, once, to make the one-line summary |
 | `git`, `code` (VS Code) | Worktrees tab, "Open in VS Code" button | Local commands only |
 

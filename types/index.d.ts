@@ -95,6 +95,18 @@ export type IssueRef = {
   actions: string[]
 }
 
+/** 이 세션에서 Bash 로 실행한 git commit 하나 */
+export type SessionCommit = {
+  /** git commit 출력의 짧은 SHA */
+  sha: string
+  branch: string
+  subject: string
+  /** 커밋 메시지에 적힌 이슈·PR 번호 (#N, Refs: #N) */
+  refs: number[]
+  /** 대화 위치(메시지 순번) */
+  order: number
+}
+
 export type IssueMeta =
   | {
       title: string
@@ -183,6 +195,7 @@ declare module 'claude-code' {
       issues: IssueRef[]
       issueMeta: Record<string, IssueMeta>
       issuesAt: string
+      commits: SessionCommit[]
       skillHits: SkillHit[]
       skillsAt: string
       tab: TabId
