@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { ActionEntry, Plan, QueryRun } from '../types'
-import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex } from '../hooks/register'
+import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
@@ -192,6 +192,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('▶ Git')
     expect(pane).not.toContain('깃헙')
+    expect(pane).toContain('▸ o/dmp.crawler  2건')
+    expect(pane).not.toContain('  dmp.crawler  ')
+    expect(pane.indexOf('▸ o/dmp.crawler')).toBeLessThan(pane.indexOf('#35'))
     expect(pane).toContain('"children":["1a2b3c4"]')
     expect(pane).toContain(' fix: 9번 수정')
     expect(pane).toContain(' docs: 문서 보완')
@@ -211,6 +214,39 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(pane).toContain('○ CI')
     expect(pane).toContain('✓ 완료')
     expect(pane).toContain('제목 9')
+  })
+}
+
+test('groups refs by repository in the order they first appear', async () => {
+  const ref = (owner: string, repo: string, number: number) => ({ key: `${owner}/${repo}#${number}`, owner, repo, number, isPull: false, url: '', order: 0, sources: [], actions: [] })
+  const groups = groupByRepo([ref('a', 'x', 3), ref('b', 'y', 1), ref('a', 'x', 1), ref('a', 'z', 2)])
+  expect(groups.map(g => g.repo)).toEqual(['a/x', 'b/y', 'a/z'])
+  expect(groups[0]?.refs.map(r => r.number)).toEqual([3, 1])
+  expect(groupByRepo([])).toEqual([])
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`draws one header per repository with its refs under it on ${surface}`, async ($, on) => {
+    on('session.messages', async () => ({
+      value: [{ role: 'user', text: 'a/x#3 와 b/y#1, 그리고 a/x#1', toolUses: [] }],
+    }) as any)
+    on('process.run', async (_$: unknown, e: any) => {
+      if (e.argv[0] !== 'sh' || String(e.argv[2] ?? '').includes('rev-parse')) return { value: { exitCode: 1, stdout: '', stderr: '' } } as any
+      const [owner, repo, number] = e.argv.slice(-3)
+      return { value: { exitCode: 0, stdout: `issue\n{"title":"제목 ${owner}/${repo}#${number}","state":"OPEN","stateReason":""}`, stderr: '' } } as any
+    })
+    on('session.cwd', async () => ({ value: '/tmp' }) as any)
+    await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface } as any)
+    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    const at = (text: string) => pane.indexOf(text)
+    expect(pane).toContain('▸ a/x  2건')
+    expect(pane).toContain('▸ b/y  1건')
+    expect(at('▸ a/x')).toBeLessThan(at('제목 a/x#3'))
+    expect(at('제목 a/x#3')).toBeLessThan(at('제목 a/x#1'))
+    expect(at('제목 a/x#1')).toBeLessThan(at('▸ b/y'))
+    expect(at('▸ b/y')).toBeLessThan(at('제목 b/y#1'))
+    expect(pane).toContain('3건')
   })
 }
 

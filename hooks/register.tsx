@@ -257,6 +257,18 @@ async function resolveCommits($: EngineInterface, candidates: CommitCandidate[])
   return dedupeCommits(resolved)
 }
 
+/** 이슈·PR 을 owner/repo 별로 묶는다. 입력 순서(대화에 나온 순서)를 묶음과 묶음 안에서 그대로 쓴다 */
+export function groupByRepo(refs: readonly IssueRef[]): { repo: string; refs: IssueRef[] }[] {
+  const groups = new Map<string, IssueRef[]>()
+  for (const ref of refs) {
+    const repo = `${ref.owner}/${ref.repo}`
+    const list = groups.get(repo) ?? []
+    list.push(ref)
+    groups.set(repo, list)
+  }
+  return [...groups].map(([repo, list]) => ({ repo, refs: list }))
+}
+
 /** 커밋을 이슈·PR 에 잇는다: 메시지의 번호, 다음으로 PR head 브랜치. 잇지 못한 커밋은 unlinked */
 export function linkCommits(
   list: SessionCommit[],
@@ -1488,30 +1500,35 @@ export const register: Register = (on, options) => {
                 <Text dimColor>{issueAt ? `  ${issueAt} 기준 · ${visibleIssues.length}건` : '  아직 읽지 않았다'}</Text>
               </Box>
               {issueAt && visibleIssues.length === 0 && linked.unlinked.length === 0 && <Text dimColor>이 세션에서 다룬 GitHub 이슈·PR 과 커밋이 없다.</Text>}
-              {visibleIssues.map(ref => {
-                const meta = metas[ref.key]
-                const hasMeta = meta !== undefined && !('error' in meta)
-                const isPull = hasMeta ? meta.isPull : ref.isPull
-                const url = ref.url.replace(/\/(issues|pull)\//, isPull ? '/pull/' : '/issues/')
-                const badge = stateBadge(meta, ref.isPull)
-                return (
-                  <Box flexDirection="column" marginTop={1}>
-                    <Box flexDirection="row">
-                      <Text bold color={badge.color}>{`${badge.text}  `}</Text>
-                      <Link href={url} label={`#${ref.number}`} />
-                      <Text>{`  ${ref.repo}  `}</Text>
-                      {hasMeta && meta.isPull && <Text dimColor>{`${meta.branch}  `}</Text>}
-                      {hasMeta && meta.isPull && <Text color="success">{`+${meta.additions.toLocaleString('en-US')} `}</Text>}
-                      {hasMeta && meta.isPull && <Text color="error">{`−${meta.deletions.toLocaleString('en-US')}  `}</Text>}
-                      {hasMeta && meta.isPull && <Text color={CI_BADGE[meta.ci].color}>{CI_BADGE[meta.ci].text}</Text>}
-                      {hasMeta && !meta.isPull && <Text dimColor>{cut(meta.title, 60)}</Text>}
-                    </Box>
-                    {hasMeta && meta.isPull && <Text dimColor>{`      ${cut(meta.title, 80)}`}</Text>}
-                    {!hasMeta && <Text dimColor>{`      ${meta && 'error' in meta ? `읽지 못함: ${meta.error}` : '읽는 중…'}`}</Text>}
-                    {commitRows(linked.byKey[ref.key] ?? [], '      ')}
-                  </Box>
-                )
-              })}
+              {groupByRepo(visibleIssues).map(group => (
+                <Box flexDirection="column" marginTop={1}>
+                  <Text bold color="claude">{`▸ ${group.repo}  ${group.refs.length}건`}</Text>
+                  {group.refs.map(ref => {
+                    const meta = metas[ref.key]
+                    const hasMeta = meta !== undefined && !('error' in meta)
+                    const isPull = hasMeta ? meta.isPull : ref.isPull
+                    const url = ref.url.replace(/\/(issues|pull)\//, isPull ? '/pull/' : '/issues/')
+                    const badge = stateBadge(meta, ref.isPull)
+                    return (
+                      <Box flexDirection="column">
+                        <Box flexDirection="row">
+                          <Text bold color={badge.color}>{`  ${badge.text}  `}</Text>
+                          <Link href={url} label={`#${ref.number}`} />
+                          <Text>{'  '}</Text>
+                          {hasMeta && meta.isPull && <Text dimColor>{`${meta.branch}  `}</Text>}
+                          {hasMeta && meta.isPull && <Text color="success">{`+${meta.additions.toLocaleString('en-US')} `}</Text>}
+                          {hasMeta && meta.isPull && <Text color="error">{`−${meta.deletions.toLocaleString('en-US')}  `}</Text>}
+                          {hasMeta && meta.isPull && <Text color={CI_BADGE[meta.ci].color}>{CI_BADGE[meta.ci].text}</Text>}
+                          {hasMeta && !meta.isPull && <Text dimColor>{cut(meta.title, 60)}</Text>}
+                        </Box>
+                        {hasMeta && meta.isPull && <Text dimColor>{`        ${cut(meta.title, 80)}`}</Text>}
+                        {!hasMeta && <Text dimColor>{`        ${meta && 'error' in meta ? `읽지 못함: ${meta.error}` : '읽는 중…'}`}</Text>}
+                        {commitRows(linked.byKey[ref.key] ?? [], '        ')}
+                      </Box>
+                    )
+                  })}
+                </Box>
+              ))}
               {linked.unlinked.length > 0 && (
                 <Box flexDirection="column" marginTop={1}>
                   <Text bold>{`이슈 없는 커밋  ${linked.unlinked.length}건`}</Text>
