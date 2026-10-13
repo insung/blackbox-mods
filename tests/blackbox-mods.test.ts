@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { ActionEntry, Plan, QueryRun } from '../types'
-import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex } from '../hooks/register'
+import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
@@ -108,6 +108,7 @@ test('attaches the Blackbox rules to each prompt as context', async ($, on) => {
     expect(rules).toContain('description 은 이 명령을 왜 실행하는지')
     expect(rules).toContain('track_decisions 도구로 항목마다 status pending')
     expect(rules).toContain('note_reads 도구로 목적')
+    expect(rules).toContain('track_agreements 도구로 status assumed')
   }
 })
 
@@ -695,3 +696,51 @@ test('keeps the start of a command output, and the deny reason or error', async 
   expect(actionOf({ tool: 'Bash', command: 'false' }, { isError: true, text: 'Exit code 1' })?.output).toBe('Exit code 1')
   expect(actionOf({ tool: 'Bash', command: 'true' }, { result: { stdout: '', stderr: '' } })?.outputLines).toBe(0)
 })
+
+test('registers assumed agreements and closes them with the user quote', async () => {
+  const first = applyAgreements([], [{ statement: 'README 두 개를 함께 고친다', kind: 'scope', evidence: '이전 PR 이 두 README 를 함께 고침', status: 'assumed' }], {
+    t: 1, at: '10:00', turn: 1, userQuote: '이전 요청',
+  })
+  expect(first.ids).toEqual(['a1'])
+  expect(first.list[0]).toMatchObject({ kind: 'scope', status: 'assumed', userQuote: '', decidedAt: '' })
+  const second = applyAgreements(first.list, [{ id: 'a1', status: 'revoked', note: '영문 README 만 고친다' }, { statement: '탭 이름은 암묵적 합의', kind: 'unknown', status: 'assumed' }], {
+    t: 2, at: '10:05', turn: 2, userQuote: 'a1: 아님',
+  })
+  expect(second.ids).toEqual(['a1', 'a2'])
+  expect(second.list[0]).toMatchObject({ status: 'revoked', note: '영문 README 만 고친다', userQuote: 'a1: 아님', quoteTurn: 2, decidedAt: '10:05', at: '10:00', evidence: '이전 PR 이 두 README 를 함께 고침' })
+  expect(second.list[1]).toMatchObject({ kind: 'premise', status: 'assumed' })
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`draws the agreements tab last and fills the prompt box on ${surface}`, async ($, on) => {
+    const fills: string[] = []
+    on('process.run', async () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }) as any)
+    on('session.cwd', async () => ({ value: '/tmp' }) as any)
+    on('prompt.read', async () => ({ value: { text: '', cursor: 0 } }) as any)
+    on('prompt.fill', async (_$: unknown, e: any) => {
+      fills.push(e.text)
+      return { isFilled: true } as any
+    })
+    const ran = await ($.tool.call as any)({
+      tool: 'mcp__blackbox-mods__track_agreements',
+      items: [{ statement: '등록 시 탭을 바꾸지 않는다', kind: 'method', evidence: '사용자가 이의 없이 진행', status: 'assumed' }],
+    })
+    expect(JSON.stringify(ran)).toContain('a1')
+    const before = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(before).toContain('▶ 세션 로그')
+    expect(before).toContain('암묵적 합의 (1)')
+    expect(before.indexOf('스킬 사용량')).toBeLessThan(before.indexOf('암묵적 합의'))
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-agreements', surface } as any)
+    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(pane).toContain('[?] a1. (작업 방식) 등록 시 탭을 바꾸지 않는다')
+    expect(pane).toContain('근거: 사용자가 이의 없이 진행')
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a1-no', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a1-yes', surface } as any)
+    expect(fills).toEqual(['a1: 아님', 'a1: 맞음'])
+    await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__track_agreements', items: [{ id: 'a1', status: 'confirmed' }] })
+    const after = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(after).toContain('[o] a1.')
+    expect(after).not.toContain('agree-a1-yes')
+    expect(after).not.toContain('암묵적 합의 (1)')
+  })
+}

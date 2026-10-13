@@ -180,7 +180,32 @@ export type Decision = {
   source: 'tool' | 'ask'
 }
 
-export type TabId = 'log' | 'decisions' | 'issues' | 'tree' | 'skills'
+/** 아무도 묻지 않았지만 Claude 가 작업의 전제로 삼은 합의 하나 */
+export type Agreement = {
+  /** a1, a2 … 사용자가 `a1: 맞음` 처럼 답할 때 이 값으로 가리킨다 */
+  id: string
+  t: number
+  at: string
+  /** 항목이 나온 요청 */
+  turn: number
+  /** 합의 내용 한 문장 */
+  statement: string
+  /** 진행 전제, 범위, 용어, 작업 방식, 요청 해석, 답 형식 */
+  kind: 'premise' | 'scope' | 'term' | 'method' | 'reading' | 'format'
+  /** 이렇게 본 근거: 사용자 발언 인용 또는 관찰 */
+  evidence: string
+  /** assumed: Claude 의 추정, confirmed: 사용자가 맞다고 함, revoked: 사용자가 아니라고 함 */
+  status: 'assumed' | 'confirmed' | 'revoked'
+  /** 철회·확인 뒤 바뀐 전제와 그에 따라 할 일 */
+  note: string
+  /** 확인·철회될 때의 사용자 답변 원문 */
+  userQuote: string
+  /** 사용자 답변이 온 요청. 답변이 길면 이 요청의 요약을 보인다 */
+  quoteTurn: number
+  decidedAt: string
+}
+
+export type TabId = 'log' | 'decisions' | 'issues' | 'tree' | 'skills' | 'agreements'
 
 declare module 'claude-code' {
   interface PluginState {
@@ -202,6 +227,7 @@ declare module 'claude-code' {
       /** 세션 로그에서 보는 요청 묶음의 key. 빈 값이면 마지막 묶음을 따라간다 */
       logPage: string
       decisions: Decision[]
+      agreements: Agreement[]
       lastPrompt: string
     }
   }

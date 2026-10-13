@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { ActionEntry, Decision, SessionCommit, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, TabId, TreeView, Turn, Worktree } from '../types'
+import type { ActionEntry, Agreement, Decision, SessionCommit, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, TabId, TreeView, Turn, Worktree } from '../types'
 
 const LOG_PANE = 'blackbox-mods'
 const TABS: { id: TabId; label: string }[] = [
@@ -10,15 +10,27 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'issues', label: 'Git' },
   { id: 'tree', label: '워크 트리' },
   { id: 'skills', label: '스킬 사용량' },
+  { id: 'agreements', label: '암묵적 합의' },
 ]
 const READ_TOOL = 'note_reads'
 const SUMMARY_LIMIT = 30
 const PLAN_TOOL = 'show_plan'
 const DECISION_TOOL = 'track_decisions'
+const AGREEMENT_TOOL = 'track_agreements'
 const QUERY_COMMAND = /run_query\.py|(^|[\s;&|])mysql\s/
 const OUTPUT_LINES = 30
 /** 세션 로그 항목 머리의 색: 종류마다 다르게 해 항목끼리 구분한다 */
 const KIND_COLOR = { plan: 'planMode', read: 'suggestion', file: 'success', command: 'bashBorder', query: 'permission' } as const
+const AGREEMENT_KINDS = ['premise', 'scope', 'term', 'method', 'reading', 'format'] as const
+const AGREEMENT_KIND_LABEL: Record<Agreement['kind'], string> = {
+  premise: '진행 전제',
+  scope: '범위',
+  term: '용어',
+  method: '작업 방식',
+  reading: '요청 해석',
+  format: '답 형식',
+}
+const AGREEMENT_MARK: Record<Agreement['status'], string> = { assumed: '[?]', confirmed: '[o]', revoked: '[-]' }
 const STEP_MARK: Record<PlanStep['status'], string> = { todo: '[ ]', doing: '[>]', done: '[x]', skipped: '[-]' }
 const DECISION_RULE = [
   '사용자에게 결정을 맡기는 항목(진행 여부, 방법 선택, 이름, 범위 등)을 답변에 남길 때는 답변을 끝내기 전에 track_decisions 도구로 항목마다 status pending, decidedBy user 로 등록한다. 질문, 선택지, 권장안을 함께 보낸다.',
@@ -26,6 +38,12 @@ const DECISION_RULE = [
   '사용자가 답하면 그 답으로 정해진 항목을 id 로 가리켜 status decided(또는 취소면 dropped)와 answer(무엇으로 정해졌는지, 그 결과 한 일을 짧게)로 갱신한다. 사용자 답변 원문은 도구가 자동으로 붙인다.',
   'AskUserQuestion 대화창의 질문과 답은 자동으로 기록되므로 따로 등록하지 않는다.',
   '사용자가 `d2: 선택지` 처럼 결정 id 와 선택지로 답하면, 그 id 의 항목을 그 선택지로 정해진 것으로 보고 track_decisions 로 갱신한다.',
+].join('\n')
+
+const AGREEMENT_RULE = [
+  '사용자가 묻거나 답하지 않았지만 Claude 가 작업의 전제로 삼은 내용(진행 전제, 범위, 용어, 작업 방식, 요청 해석, 답 형식)이 생기면, 답변을 끝내기 전에 track_agreements 도구로 status assumed 로 등록한다. 근거(사용자 발언 인용 또는 관찰한 사실)를 함께 보낸다.',
+  '명시적으로 묻고 답한 항목은 track_decisions 로만 등록한다. 이미 등록한 합의는 다시 등록하지 않고 그 id 로 갱신한다.',
+  '사용자가 `a1: 맞음` 이라고 하면 그 항목을 status confirmed 로, `a1: 아님` 이라고 하면 status revoked 로 갱신하고 note 에 바뀐 전제와 그에 따라 할 일을 쓴다. 철회된 전제로 이미 한 작업은 다시 확인한다.',
 ].join('\n')
 
 const READ_RULE = [
@@ -43,7 +61,7 @@ const COMMAND_RULE = [
   '사용자는 Blackbox 패널의 세션 로그에서 이 문장을 명령의 목적으로 읽는다.',
 ].join('\n')
 
-const RULES = ['Blackbox 패널 기록 규칙', PURPOSE_RULE, COMMAND_RULE, DECISION_RULE, READ_RULE].join('\n\n')
+const RULES = ['Blackbox 패널 기록 규칙', PURPOSE_RULE, COMMAND_RULE, DECISION_RULE, AGREEMENT_RULE, READ_RULE].join('\n\n')
 
 const turns = atom({ plugin: 'blackbox-mods', key: 'turns' } as const, [] as Turn[])
 const reads = atom({ plugin: 'blackbox-mods', key: 'reads' } as const, [] as ReadEntry[])
@@ -59,6 +77,7 @@ const commits = atom({ plugin: 'blackbox-mods', key: 'commits' } as const, [] as
 const skillHits = atom({ plugin: 'blackbox-mods', key: 'skillHits' } as const, [] as SkillHit[])
 const skillsAt = atom({ plugin: 'blackbox-mods', key: 'skillsAt' } as const, '')
 const decisions = atom({ plugin: 'blackbox-mods', key: 'decisions' } as const, [] as Decision[])
+const agreements = atom({ plugin: 'blackbox-mods', key: 'agreements' } as const, [] as Agreement[])
 const lastPrompt = atom({ plugin: 'blackbox-mods', key: 'lastPrompt' } as const, '')
 const tab = atom({ plugin: 'blackbox-mods', key: 'tab' } as const, 'log' as TabId)
 const logPage = atom({ plugin: 'blackbox-mods', key: 'logPage' } as const, '')
@@ -487,6 +506,69 @@ export function applyDecisions(
       userQuote: status === 'pending' || decidedBy === 'claude' ? '' : context.userQuote,
       decidedAt: status === 'pending' ? '' : context.at,
       source: context.source,
+    }
+    next.push(created)
+    ids.push(created.id)
+  }
+  return { list: next.slice(-200), ids }
+}
+
+type AgreementInput = {
+  id?: unknown
+  statement?: unknown
+  kind?: unknown
+  evidence?: unknown
+  status?: unknown
+  note?: unknown
+}
+
+/** id 가 있으면 그 항목을 고치고, 없으면 새 id(a1, a2 …)로 넣는다. 확인·철회될 때 사용자 답변 원문을 붙인다 */
+export function applyAgreements(
+  list: Agreement[],
+  inputs: AgreementInput[],
+  context: { t: number; at: string; turn: number; userQuote: string },
+): { list: Agreement[]; ids: string[] } {
+  const next = [...list]
+  const ids: string[] = []
+  let serial = next.reduce((max, one) => Math.max(max, Number(one.id.replace(/\D/g, '')) || 0), 0)
+  for (const input of inputs) {
+    const status = (['assumed', 'confirmed', 'revoked'] as const).includes(input.status as Agreement['status'])
+      ? (input.status as Agreement['status'])
+      : 'assumed'
+    const kind = AGREEMENT_KINDS.includes(input.kind as Agreement['kind']) ? (input.kind as Agreement['kind']) : undefined
+    const id = typeof input.id === 'string' && input.id ? input.id : ''
+    const at = next.findIndex(one => one.id === id)
+    if (at >= 0) {
+      const old = next[at] as Agreement
+      const isClosing = status !== 'assumed' && old.status === 'assumed'
+      next[at] = {
+        ...old,
+        statement: typeof input.statement === 'string' && input.statement ? input.statement : old.statement,
+        kind: kind ?? old.kind,
+        evidence: typeof input.evidence === 'string' && input.evidence ? input.evidence : old.evidence,
+        status,
+        note: typeof input.note === 'string' && input.note ? input.note : old.note,
+        userQuote: isClosing ? context.userQuote : old.userQuote,
+        quoteTurn: isClosing ? context.turn : old.quoteTurn,
+        decidedAt: isClosing ? context.at : status === 'assumed' ? '' : old.decidedAt,
+      }
+      ids.push(old.id)
+      continue
+    }
+    serial += 1
+    const created: Agreement = {
+      id: id || `a${serial}`,
+      t: context.t,
+      at: context.at,
+      turn: context.turn,
+      statement: String(input.statement ?? ''),
+      kind: kind ?? 'premise',
+      evidence: String(input.evidence ?? ''),
+      status,
+      note: String(input.note ?? ''),
+      userQuote: status === 'assumed' ? '' : context.userQuote,
+      quoteTurn: status === 'assumed' ? 0 : context.turn,
+      decidedAt: status === 'assumed' ? '' : context.at,
     }
     next.push(created)
     ids.push(created.id)
@@ -991,7 +1073,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'blackbox-mods',
-      description: 'Blackbox 패널을 연다 (탭: 세션 로그·결정 사항·Git·워크 트리·스킬 사용량)',
+      description: 'Blackbox 패널을 연다 (탭: 세션 로그·결정 사항·Git·워크 트리·스킬 사용량·암묵적 합의)',
     })
     await $.tool.register({
       name: PLAN_TOOL,
@@ -1052,6 +1134,37 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
     await $.tool.register({
+      name: AGREEMENT_TOOL,
+      description:
+        '아무도 묻지 않았지만 Claude 가 작업의 전제로 삼은 합의를 Blackbox 의 암묵적 합의 탭에 기록한다. 새 항목은 id 없이 status assumed 와 근거를 보낸다(도구가 a1, a2 … id 를 돌려준다). 사용자가 `a1: 맞음` 이면 같은 id 로 status confirmed, `a1: 아님` 이면 status revoked 와 note 를 보낸다. 사용자 답변 원문은 도구가 붙인다.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', description: '갱신할 항목의 id (a1 …). 새 항목이면 뺀다' },
+                statement: { type: 'string', description: '합의 내용, 한 문장' },
+                kind: {
+                  type: 'string',
+                  enum: [...AGREEMENT_KINDS],
+                  description: 'premise: 진행 전제, scope: 범위, term: 용어, method: 작업 방식, reading: 요청 해석, format: 답 형식',
+                },
+                evidence: { type: 'string', description: '이렇게 본 근거: 사용자 발언 인용 또는 관찰한 사실, 한 줄' },
+                status: { type: 'string', enum: ['assumed', 'confirmed', 'revoked'] },
+                note: { type: 'string', description: '확인·철회 뒤 바뀐 전제와 그에 따라 할 일, 짧게' },
+              },
+              required: ['status'],
+            },
+          },
+        },
+        required: ['items'],
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
       name: READ_TOOL,
       description:
         '이 요청에서 Read 도구로 읽은 파일들을 왜 읽었고 읽고 무엇을 알았는지 Blackbox 에 남긴다. 목적과 결과를 각각 한두 줄로 보낸다. 파일 경로는 도구가 자동으로 모으므로 보낼 필요가 없다.',
@@ -1102,6 +1215,23 @@ export const register: Register = (on, options) => {
     const pending = (await read($, decisions)).filter(one => one.status === 'pending').length
 
     return { result: `결정 항목을 기록했다: ${ids.join(', ')} (대기 ${pending}건).` }
+  })
+
+  on('tool.call', { tool: `mcp__blackbox-mods__${AGREEMENT_TOOL}` }, async ($, e) => {
+    const input = e as unknown as { items?: unknown }
+    const items = Array.isArray(input.items) ? (input.items as AgreementInput[]) : []
+    const quote = await read($, lastPrompt)
+    const turn = await currentTurn($)
+    let ids: string[] = []
+    await update($, agreements, list => {
+      const applied = applyAgreements(list, items, { t: Date.now(), at: timeNow(), turn, userQuote: quote })
+      ids = applied.ids
+      return applied.list
+    })
+    // 합의 등록은 결정보다 잦아, 탭을 바꾸지 않고 탭 이름 옆 숫자로 알린다
+    const assumed = (await read($, agreements)).filter(one => one.status === 'assumed').length
+
+    return { result: `합의 항목을 기록했다: ${ids.join(', ')} (확인 대기 ${assumed}건).` }
   })
 
   on('tool.call', { tool: `mcp__blackbox-mods__${READ_TOOL}` }, async ($, e) => {
@@ -1193,7 +1323,7 @@ export const register: Register = (on, options) => {
     await refreshIssues($).catch(() => undefined)
     await refreshSkills($).catch(() => undefined)
 
-    return { text: 'Blackbox 패널을 열었다. 위쪽 탭으로 세션 로그·결정 사항·Git·워크 트리·스킬 사용량을 바꿔 본다.' }
+    return { text: 'Blackbox 패널을 열었다. 위쪽 탭으로 세션 로그·결정 사항·Git·워크 트리·스킬 사용량·암묵적 합의를 바꿔 본다.' }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -1260,7 +1390,16 @@ export const register: Register = (on, options) => {
     }
     decisionGroups.reverse()
     const pendingCount = allDecisions.filter(one => one.status === 'pending').length
-    const quoteOf = (one: Decision) => {
+    const allAgreements = await read($, agreements)
+    const agreementGroups: { turn: number; title: string; items: Agreement[] }[] = []
+    for (const one of allAgreements) {
+      const group = agreementGroups.find(g => g.turn === one.turn && one.turn > 0)
+      if (group) group.items.push(one)
+      else agreementGroups.push({ turn: one.turn, title: turnOf(one.turn)?.summary ?? `(요청 기록 없음) ${one.at}`, items: [one] })
+    }
+    agreementGroups.reverse()
+    const assumedCount = allAgreements.filter(one => one.status === 'assumed').length
+    const quoteOf = (one: Decision | Agreement) => {
       const quote = one.userQuote.replace(/\s+/g, ' ').trim()
       if (quote.length <= 60) return quote
       return turnOf(one.quoteTurn ?? 0)?.summary ?? `${quote.slice(0, 60)}…`
@@ -1298,7 +1437,7 @@ export const register: Register = (on, options) => {
           {TABS.map(one => (
             <Button
               key={`tab-${one.id}`}
-              label={`${one.id === current ? '▶ ' : '  '}${one.label}${one.id === 'decisions' && pendingCount > 0 ? ` (${pendingCount})` : ''}`}
+              label={`${one.id === current ? '▶ ' : '  '}${one.label}${one.id === 'decisions' && pendingCount > 0 ? ` (${pendingCount})` : ''}${one.id === 'agreements' && assumedCount > 0 ? ` (${assumedCount})` : ''}`}
               dimColor={one.id !== current}
               onPress={() => choose(one.id)}
             />
@@ -1440,6 +1579,34 @@ export const register: Register = (on, options) => {
                     </Box>
                   )
                 })}
+              </Box>
+            ))}
+          </Box>
+        )}
+        {current === 'agreements' && (
+          <Box flexDirection="column">
+            <Text dimColor>{`${assumedCount > 0 ? `확인 대기 ${assumedCount}건` : '확인 대기 없음'} · [?] 추정  [o] 맞음  [-] 아님`}</Text>
+            {agreementGroups.length === 0 && <Text dimColor>아직 암묵적 합의가 없다.</Text>}
+            {agreementGroups.map(group => (
+              <Box flexDirection="column" marginTop={1}>
+                <Text bold color="claude">{separator(group.title, width)}</Text>
+                {group.items.map(one => (
+                  <Box flexDirection="column">
+                    <Text bold={one.status === 'assumed'} color={one.status === 'assumed' ? 'warning' : undefined} dimColor={one.status === 'revoked'}>
+                      {`${AGREEMENT_MARK[one.status]} ${one.id}. (${AGREEMENT_KIND_LABEL[one.kind]}) ${one.statement}`}
+                    </Text>
+                    {one.evidence && <Text dimColor>{`    근거: ${one.evidence}`}</Text>}
+                    {one.status === 'assumed' && (
+                      <Box flexDirection="row">
+                        <Text dimColor>    </Text>
+                        <Button key={`agree-${one.id}-yes`} label="맞음" onPress={() => pickOption($, one.id, '맞음')} />
+                        <Button key={`agree-${one.id}-no`} label="아님" onPress={() => pickOption($, one.id, '아님')} />
+                      </Box>
+                    )}
+                    {one.note && <Text>{`    => ${one.note}`}</Text>}
+                    {one.status !== 'assumed' && one.userQuote && <Text dimColor>{`    -> ${quoteOf(one)}`}</Text>}
+                  </Box>
+                ))}
               </Box>
             ))}
           </Box>

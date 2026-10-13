@@ -4,7 +4,7 @@
 
 A Claude Code mod that records what Claude looks at, what it decides, and where it works, in one panel next to the conversation.
 
-Open it with `/blackbox-mods`. The panel text is in Korean. The panel has five tabs:
+Open it with `/blackbox-mods`. The panel text is in Korean. The panel has six tabs:
 
 | Tab | What it shows |
 | --- | --- |
@@ -13,6 +13,7 @@ Open it with `/blackbox-mods`. The panel text is in Korean. The panel has five t
 | Git | Issues and PRs handled in this session, grouped by repository under an `▸ owner/repo  N건` header (repositories and items in the order they first appear). Each row follows the app's PR chip: state · #number · branch · +additions −deletions · CI. Commits made with Bash in this session (short SHA · subject; a commit made with `-q` is found in git by its subject) appear under the issue or PR they belong to, matched by `#N` in the message or by the PR's head branch; the rest are listed under "Commits without an issue" (이슈 없는 커밋) |
 | Worktrees | Git worktrees this session uses, as a tree per repository, with an "Open in VS Code" button on each worktree in use |
 | Skill usage | Skill runs grouped by plugin, custom skills, and built-in skills, with counts, shares, and an excerpt of the request that triggered each run |
+| Implicit agreements | What Claude took as agreed without anyone asking: scope, terms, way of working, how a request was read, and the like. Each item shows its kind and evidence. An item Claude assumed shows `[?]` with `맞음` (yes) and `아님` (no) buttons that fill the prompt box with `a1: 맞음` or `a1: 아님`; you send it. Confirmed items show `[o]`, revoked items `[-]` with what changed |
 
 ## Install
 
@@ -36,18 +37,20 @@ claude plugin update blackbox-mods@blackbox-mods
 
 ## What the mod adds to Claude
 
-The mod registers three tools the model can call and adds rules to the system prompt so the panel gets filled.
+The mod registers four tools the model can call and adds rules to the system prompt so the panel gets filled.
 
 | Tool | Purpose |
 | --- | --- |
 | `mcp__blackbox-mods__show_plan` | Records the steps of a multi-step task. Shown as a flow in the Session log tab |
 | `mcp__blackbox-mods__track_decisions` | Records items you must decide and items Claude decided, and how each one was decided |
+| `mcp__blackbox-mods__track_agreements` | Records what Claude took as agreed without asking, with its evidence, and whether you confirmed or revoked it |
 | `mcp__blackbox-mods__note_reads` | Records why Claude read files and what it concluded |
 
 System prompt rules:
 
 - Start each SQL statement with a `-- 조회 목적: <purpose>` comment. The panel shows it as the query purpose.
 - Register decision items with `track_decisions`, and update them when you answer. An answer in the form `d1: option` decides item `d1`.
+- Register implicit agreements with `track_agreements`, not items that were asked and answered. An answer `a1: 맞음` confirms item `a1`; `a1: 아님` revokes it, and Claude rechecks work done on it.
 - After reading files to reach a conclusion, send the purpose and the conclusion with `note_reads`.
 
 Automatic records (no tool call needed): Bash commands that run `run_query.py` or `mysql`, files read with the Read tool, `AskUserQuestion` answers, skill runs, and GitHub references in the conversation.
