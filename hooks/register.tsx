@@ -1552,13 +1552,13 @@ export const register: Register = (on, options) => {
             {decisionGroups.map(group => (
               <Box flexDirection="column" marginTop={1}>
                 <Text bold color="claude">{separator(group.title, width)}</Text>
-                {group.items.map((one, index) => {
+                {group.items.map(one => {
                   const box = one.status === 'pending' ? '[ ]' : one.status === 'decided' ? '[x]' : '[-]'
                   const result = one.status === 'dropped' ? ` => 취소${one.answer ? `: ${one.answer}` : ''}` : one.answer ? ` => ${one.answer}` : ''
                   return (
                     <Box flexDirection="column">
                       <Text bold={one.status === 'pending'} color={one.status === 'pending' ? 'warning' : undefined}>
-                        {`${box} ${index + 1}. ${one.question}${one.status === 'pending' ? '' : result}${one.decidedBy === 'claude' ? '  (Claude 가 정함)' : ''}`}
+                        {`${box} ${one.id}. ${one.question}${one.status === 'pending' ? '' : result}${one.decidedBy === 'claude' ? '  (Claude 가 정함)' : ''}`}
                       </Text>
                       {one.status === 'pending' && one.options.length > 0 && (
                         <Box flexDirection="row" flexWrap="wrap">

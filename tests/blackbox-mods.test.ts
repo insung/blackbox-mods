@@ -394,15 +394,19 @@ for (const surface of ['terminal', 'desktop'] as const) {
     let pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('▶ 결정 사항 (1)')
     expect(pane).toContain('── 결정 사항을 별도 탭으로 보여 줘 ')
-    expect(pane).toContain('[ ] 1. 도구로 결정 대기 항목을 등록할지')
-    expect(pane).toContain('[x] 2. 사용자 답변 원문을 자동으로 붙인다  (Claude 가 정함)')
+    expect(pane).toContain('[ ] d1. 도구로 결정 대기 항목을 등록할지')
+    expect(pane).toContain('[x] d2. 사용자 답변 원문을 자동으로 붙인다  (Claude 가 정함)')
     await $.prompt.submit({ text: '등록하지마.' } as any).catch(() => undefined)
-    await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__track_decisions', items: [{ id: 'd1', status: 'decided', answer: '등록 안 함' }] } as any)
+    await ($.tool.call as any)({
+      tool: 'mcp__blackbox-mods__track_decisions',
+      items: [{ id: 'd1', status: 'decided', answer: '등록 안 함' }, { question: '다음 요청의 결정', status: 'pending', decidedBy: 'user' }],
+    } as any)
     pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(pane).toContain('[x] 1. 도구로 결정 대기 항목을 등록할지 => 등록 안 함')
+    expect(pane).toContain('[x] d1. 도구로 결정 대기 항목을 등록할지 => 등록 안 함')
+    expect(pane).toContain('[ ] d3. 다음 요청의 결정')
     expect(pane).toContain('-> 등록하지마.')
     expect(pane.match(/도구로 결정 대기 항목을 등록할지/g)?.length).toBe(1)
-    expect(pane).not.toContain('결정 대기 1건')
+    expect(pane).toContain('결정 대기 1건')
   })
 }
 
