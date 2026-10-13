@@ -92,17 +92,23 @@ test('finds cd targets and parses worktree lists', async () => {
   ])
 })
 
-test('asks the model for a purpose comment in the system prompt', async ($, on) => {
-  on('prompt.compose', async () => ({ sections: [] }))
-  const composed = await $.prompt.compose({
-    model: 'claude-opus-5-5',
-    promptModel: 'claude-opus-5-5',
-    surfaces: ['desktop'],
-    tools: ['Bash'],
-    outputStyle: null,
-    traits: [],
-  } as any)
-  expect(composed.sections.some(section => section.id === 'blackbox-mods:purpose')).toBe(true)
+test('attaches the Blackbox rules to each prompt as context', async ($, on) => {
+  on('model.complete', async () => ({ value: { isAnswered: true, text: '요약', usage: {} } }) as any)
+  const contexts: (readonly string[] | undefined)[] = []
+  on('prompt.submit', async (_$: unknown, e: any) => {
+    contexts.push(e.context)
+    return { text: e.text, context: e.context } as any
+  })
+  await $.prompt.submit({ text: '첫 요청' } as any).catch(() => undefined)
+  await $.prompt.submit({ text: '둘째 요청' } as any).catch(() => undefined)
+  expect(contexts.length).toBe(2)
+  for (const context of contexts) {
+    const rules = (context ?? []).join('\n')
+    expect(rules).toContain('-- 조회 목적:')
+    expect(rules).toContain('description 은 이 명령을 왜 실행하는지')
+    expect(rules).toContain('track_decisions 도구로 항목마다 status pending')
+    expect(rules).toContain('note_reads 도구로 목적')
+  }
 })
 
 for (const surface of ['terminal', 'desktop'] as const) {
@@ -688,11 +694,4 @@ test('keeps the start of a command output, and the deny reason or error', async 
   expect(actionOf({ tool: 'Bash', command: 'rm x' }, { deny: '거부함' })?.output).toBe('거부함')
   expect(actionOf({ tool: 'Bash', command: 'false' }, { isError: true, text: 'Exit code 1' })?.output).toBe('Exit code 1')
   expect(actionOf({ tool: 'Bash', command: 'true' }, { result: { stdout: '', stderr: '' } })?.outputLines).toBe(0)
-})
-
-test('asks Claude to write each Bash description as the purpose of the command', async ($, on) => {
-  on('prompt.compose', async () => ({ sections: [] }) as any)
-  const composed = await ($.prompt as any).compose({ model: 'm', promptModel: 'm', surfaces: [], tools: [], outputStyle: null, traits: [] } as any)
-  const rule = composed.sections.find((one: { id: string }) => one.id === 'blackbox-mods:commands')
-  expect(rule?.text).toContain('description 은 이 명령을 왜 실행하는지')
 })

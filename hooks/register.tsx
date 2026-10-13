@@ -43,6 +43,8 @@ const COMMAND_RULE = [
   '사용자는 Blackbox 패널의 세션 로그에서 이 문장을 명령의 목적으로 읽는다.',
 ].join('\n')
 
+const RULES = ['Blackbox 패널 기록 규칙', PURPOSE_RULE, COMMAND_RULE, DECISION_RULE, READ_RULE].join('\n\n')
+
 const turns = atom({ plugin: 'blackbox-mods', key: 'turns' } as const, [] as Turn[])
 const reads = atom({ plugin: 'blackbox-mods', key: 'reads' } as const, [] as ReadEntry[])
 const runs = atom({ plugin: 'blackbox-mods', key: 'runs' } as const, [] as QueryRun[])
@@ -1070,20 +1072,6 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('prompt.compose', async ($, e, next) => {
-    const composed = await next(e)
-
-    return {
-      sections: [
-        ...composed.sections,
-        { id: 'blackbox-mods:purpose', text: PURPOSE_RULE, scope: 'session' as const },
-        { id: 'blackbox-mods:commands', text: COMMAND_RULE, scope: 'session' as const },
-        { id: 'blackbox-mods:decisions', text: DECISION_RULE, scope: 'session' as const },
-        { id: 'blackbox-mods:reads', text: READ_RULE, scope: 'session' as const },
-      ],
-    }
-  })
-
   on('prompt.submit', async ($, e, next) => {
     const words = userWords(e.text)
     if (words) {
@@ -1094,7 +1082,8 @@ export const register: Register = (on, options) => {
       void summarizeTurn($, turn).catch(() => undefined)
     }
 
-    return next(e)
+    // 데스크톱 앱처럼 호스트가 시스템 프롬프트를 직접 만드는 세션에는 prompt.compose 섹션이 실리지 않아, 규칙을 요청마다 context 로 붙인다
+    return next({ ...e, context: [...(e.context ?? []), RULES] })
   })
 
   on('tool.call', { tool: `mcp__blackbox-mods__${DECISION_TOOL}` }, async ($, e) => {
