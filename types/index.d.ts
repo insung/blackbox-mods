@@ -48,6 +48,10 @@ export type ActionEntry = {
   /** command: Bash description, file: 수정·작성 */
   note: string
   status: 'done' | 'failed' | 'denied'
+  /** command: 출력 앞부분 (실패면 오류 글, 거부면 거부 이유). file: 빈 값 */
+  output: string
+  /** command: 출력 전체 줄 수 */
+  outputLines: number
 }
 
 export type PlanStep = {

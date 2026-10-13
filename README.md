@@ -8,7 +8,7 @@ Open it with `/blackbox-mods`. The panel text is in Korean. The panel has five t
 
 | Tab | What it shows |
 | --- | --- |
-| Session log | One separator per request (time + one-line summary). Under it: database queries (purpose, SQL, result table), files Claude read (purpose, full paths, conclusion), files Claude changed with Edit·Write·NotebookEdit (written or edited, full path), other Bash commands (description, command, failed or denied), and work plans as an ASCII flow |
+| Session log | One separator per request (time + one-line summary). Under it: database queries (purpose, SQL, result table), files Claude read (purpose, full paths, conclusion), files Claude changed with Edit·Write·NotebookEdit (written or edited, full path), other Bash commands (purpose from the Bash description, the command shortened to the start of its first line, the first lines of its output, failed or denied), and work plans as an ASCII flow |
 | Decisions | Items you must decide (`[ ]`) and items Claude decided itself (`[x] … (Claude 가 정함)`), grouped by request. When an item is decided, the same line shows `=> result` and `-> your answer`. Option buttons put `d1: option` in the prompt box; you send it |
 | GitHub | Issues and PRs handled in this session, in the same order as the app's PR chip: state · #number · repository · branch · +additions −deletions · CI |
 | Worktrees | Git worktrees this session uses, as a tree per repository, with an "Open in VS Code" button on each worktree in use |
