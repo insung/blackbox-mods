@@ -1,13 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { ActionEntry, Decision, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, TabId, TreeView, Turn, Worktree } from '../types'
+import type { ActionEntry, Decision, SessionCommit, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, TabId, TreeView, Turn, Worktree } from '../types'
 
 const LOG_PANE = 'blackbox-mods'
 const TABS: { id: TabId; label: string }[] = [
   { id: 'log', label: '세션 로그' },
   { id: 'decisions', label: '결정 사항' },
-  { id: 'issues', label: '깃헙' },
+  { id: 'issues', label: 'Git' },
   { id: 'tree', label: '워크 트리' },
   { id: 'skills', label: '스킬 사용량' },
 ]
@@ -51,6 +51,7 @@ const tree = atom({ plugin: 'blackbox-mods', key: 'tree' } as const, null as Tre
 const issues = atom({ plugin: 'blackbox-mods', key: 'issues' } as const, [] as IssueRef[])
 const issueMeta = atom({ plugin: 'blackbox-mods', key: 'issueMeta' } as const, {} as Record<string, IssueMeta>)
 const issuesAt = atom({ plugin: 'blackbox-mods', key: 'issuesAt' } as const, '')
+const commits = atom({ plugin: 'blackbox-mods', key: 'commits' } as const, [] as SessionCommit[])
 const skillHits = atom({ plugin: 'blackbox-mods', key: 'skillHits' } as const, [] as SkillHit[])
 const skillsAt = atom({ plugin: 'blackbox-mods', key: 'skillsAt' } as const, '')
 const decisions = atom({ plugin: 'blackbox-mods', key: 'decisions' } as const, [] as Decision[])
@@ -142,6 +143,49 @@ export function collectIssues(
     }
   })
   return [...byKey.values()].sort((a, b) => a.order - b.order)
+}
+
+const GIT_COMMIT = /\bgit\s+(?:-C\s+\S+\s+)?commit\b/
+const COMMIT_LINE = /^\[([^\s\]]+)(?: \([\w-]+\))? ([0-9a-f]{7,40})\] (.+)$/gm
+
+/** git commit 출력 `[branch sha] 제목` 에서 커밋을 꺼낸다. 메시지의 #N 은 명령 전체(-m, heredoc)에서 찾는다 */
+export function commitsInRun(command: string, resultText: string, order: number): SessionCommit[] {
+  if (!GIT_COMMIT.test(executedPart(command))) return []
+  const refs = [...new Set([...command.matchAll(/(?<![\w&/])#(\d+)\b/g)].map(m => Number(m[1])))].filter(n => n > 0)
+  return [...resultText.matchAll(COMMIT_LINE)].map(m => ({ sha: m[2] ?? '', branch: m[1] ?? '', subject: (m[3] ?? '').trim(), refs, order }))
+}
+
+/** 세션의 Bash 호출에서 커밋을 모은다. amend·rebase 로 같은 브랜치에 같은 제목이 다시 나오면 마지막 것만 남긴다 */
+export function collectCommits(messages: readonly TranscriptMessage[]): SessionCommit[] {
+  const found: SessionCommit[] = []
+  messages.forEach((message, order) => {
+    for (const use of message.toolUses ?? []) {
+      if (use.tool !== 'Bash' || typeof use.input.command !== 'string') continue
+      found.push(...commitsInRun(use.input.command, use.text ?? '', order))
+    }
+  })
+  return found.filter((one, index) => !found.slice(index + 1).some(later => later.branch === one.branch && later.subject === one.subject))
+}
+
+/** 커밋을 이슈·PR 에 잇는다: 메시지의 번호, 다음으로 PR head 브랜치. 잇지 못한 커밋은 unlinked */
+export function linkCommits(
+  list: SessionCommit[],
+  refs: readonly IssueRef[],
+  metas: Record<string, IssueMeta>,
+): { byKey: Record<string, SessionCommit[]>; unlinked: SessionCommit[] } {
+  const byKey: Record<string, SessionCommit[]> = {}
+  const unlinked: SessionCommit[] = []
+  for (const one of list) {
+    const byNumber = refs.find(ref => one.refs.includes(ref.number))
+    const byBranch = refs.find(ref => {
+      const meta = metas[ref.key]
+      return meta !== undefined && !('error' in meta) && meta.isPull && meta.branch === one.branch
+    })
+    const target = byNumber ?? byBranch
+    if (target) (byKey[target.key] ??= []).push(one)
+    else unlinked.push(one)
+  }
+  return { byKey, unlinked }
 }
 
 type TranscriptMessage = {
@@ -430,6 +474,7 @@ async function refreshIssues($: EngineInterface): Promise<void> {
   const messages = await $.session.messages()
   const list = collectIssues(Array.isArray(messages) ? messages : [])
   await update($, issues, () => list)
+  await update($, commits, () => collectCommits(Array.isArray(messages) ? messages : []))
   await update($, issuesAt, () => timeNow())
   for (const ref of list) {
     const meta = await fetchMeta($, ref).catch(() => ({ error: '읽지 못함' }) as IssueMeta)
@@ -821,7 +866,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'blackbox-mods',
-      description: 'Blackbox 패널을 연다 (탭: 세션 로그·결정 사항·깃헙·워크 트리·스킬 사용량)',
+      description: 'Blackbox 패널을 연다 (탭: 세션 로그·결정 사항·Git·워크 트리·스킬 사용량)',
     })
     await $.tool.register({
       name: PLAN_TOOL,
@@ -1036,7 +1081,7 @@ export const register: Register = (on, options) => {
     await refreshIssues($).catch(() => undefined)
     await refreshSkills($).catch(() => undefined)
 
-    return { text: 'Blackbox 패널을 열었다. 위쪽 탭으로 세션 로그·결정 사항·깃헙·워크 트리·스킬 사용량을 바꿔 본다.' }
+    return { text: 'Blackbox 패널을 열었다. 위쪽 탭으로 세션 로그·결정 사항·Git·워크 트리·스킬 사용량을 바꿔 본다.' }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -1110,6 +1155,15 @@ export const register: Register = (on, options) => {
       return !(meta && 'error' in meta && meta.notFound)
     })
     const issueAt = await read($, issuesAt)
+    const linked = linkCommits(await read($, commits), visibleIssues, metas)
+    const commitRows = (list: SessionCommit[], lead: string) =>
+      list.map((one, n) => (
+        <Box flexDirection="row">
+          <Text dimColor>{`${lead}${n === list.length - 1 ? '└─' : '├─'} `}</Text>
+          <Text color="warning">{one.sha}</Text>
+          <Text>{` ${cut(one.subject, 70)}`}</Text>
+        </Box>
+      ))
     const hits = await read($, skillHits)
     const skillAt = await read($, skillsAt)
     const cut = (text: string, size: number) => (text.length > size ? `${text.slice(0, size)}…` : text)
@@ -1284,7 +1338,7 @@ export const register: Register = (on, options) => {
                 <Button key="refresh-issues" onPress={() => refreshIssues($)}>새로고침</Button>
                 <Text dimColor>{issueAt ? `  ${issueAt} 기준 · ${visibleIssues.length}건` : '  아직 읽지 않았다'}</Text>
               </Box>
-              {issueAt && visibleIssues.length === 0 && <Text dimColor>이 세션에서 다룬 GitHub 이슈·PR 이 없다.</Text>}
+              {issueAt && visibleIssues.length === 0 && linked.unlinked.length === 0 && <Text dimColor>이 세션에서 다룬 GitHub 이슈·PR 과 커밋이 없다.</Text>}
               {visibleIssues.map(ref => {
                 const meta = metas[ref.key]
                 const hasMeta = meta !== undefined && !('error' in meta)
@@ -1305,9 +1359,16 @@ export const register: Register = (on, options) => {
                     </Box>
                     {hasMeta && meta.isPull && <Text dimColor>{`      ${cut(meta.title, 80)}`}</Text>}
                     {!hasMeta && <Text dimColor>{`      ${meta && 'error' in meta ? `읽지 못함: ${meta.error}` : '읽는 중…'}`}</Text>}
+                    {commitRows(linked.byKey[ref.key] ?? [], '      ')}
                   </Box>
                 )
               })}
+              {linked.unlinked.length > 0 && (
+                <Box flexDirection="column" marginTop={1}>
+                  <Text bold>{`이슈 없는 커밋  ${linked.unlinked.length}건`}</Text>
+                  {commitRows(linked.unlinked, '  ')}
+                </Box>
+              )}
             </Box>
         )}
         {current === 'skills' && (

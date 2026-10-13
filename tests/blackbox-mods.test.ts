@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { ActionEntry, Plan, QueryRun } from '../types'
-import { actionOf, commandText, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
+import { actionOf, collectCommits, commitsInRun, linkCommits, commandText, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
@@ -160,7 +160,18 @@ test('collects issues from the transcript in first-seen order', async () => {
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`draws GitHub rows like the app's PR chip on ${surface}`, async ($, on) => {
     on('session.messages', async () => ({
-      value: [{ role: 'user', text: 'https://github.com/o/dmp.crawler/pull/35 와 https://github.com/o/dmp.crawler/issues/9', toolUses: [] }],
+      value: [
+        { role: 'user', text: 'https://github.com/o/dmp.crawler/pull/35 와 https://github.com/o/dmp.crawler/issues/9', toolUses: [] },
+        {
+          role: 'assistant',
+          text: '',
+          toolUses: [
+            { tool: 'Bash', input: { command: "git commit -m 'fix: 9번 수정' -m 'Refs: #9'" }, text: '[fix/9 1a2b3c4] fix: 9번 수정\n 1 file changed' },
+            { tool: 'Bash', input: { command: "git commit -m 'docs: 문서 보완'" }, text: '[docs/o-rk-a-rk-reverse-engineering 5d6e7f8] docs: 문서 보완' },
+            { tool: 'Bash', input: { command: "git commit -m 'chore: 정리'" }, text: '[main 9a8b7c6] chore: 정리' },
+          ],
+        },
+      ],
     }) as any)
     on('process.run', async (_$: unknown, e: any) => {
       const number = e.argv.at(-1)
@@ -174,7 +185,16 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
     await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface } as any)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(pane).toContain('▶ 깃헙')
+    expect(pane).toContain('▶ Git')
+    expect(pane).not.toContain('깃헙')
+    expect(pane).toContain('"children":["1a2b3c4"]')
+    expect(pane).toContain(' fix: 9번 수정')
+    expect(pane).toContain(' docs: 문서 보완')
+    expect(pane.indexOf('#35')).toBeLessThan(pane.indexOf('5d6e7f8'))
+    expect(pane.indexOf('5d6e7f8')).toBeLessThan(pane.indexOf('제목 9'))
+    expect(pane.indexOf('제목 9')).toBeLessThan(pane.indexOf('1a2b3c4'))
+    expect(pane).toContain('이슈 없는 커밋  1건')
+    expect(pane.indexOf('이슈 없는 커밋')).toBeLessThan(pane.indexOf('9a8b7c6'))
     expect(pane).toContain('⎇ 머지됨')
     expect(pane).toContain('#35')
     expect(pane).toContain('https://github.com/o/dmp.crawler/pull/35')
@@ -186,6 +206,33 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(pane).toContain('제목 9')
   })
 }
+
+test('reads commits that a Bash call made, with the numbers in the message', async () => {
+  const heredoc = "git add -A && git commit -q -F - <<'EOF'\nfeat(x): 기능\n\n본문에 # 문자\n\nRefs: #10\nEOF"
+  expect(commitsInRun(heredoc, '[feat/10-x 041d59b] feat(x): 기능', 3)).toEqual([
+    { sha: '041d59b', branch: 'feat/10-x', subject: 'feat(x): 기능', refs: [10], order: 3 },
+  ])
+  expect(commitsInRun('git commit -m "init"', '[main (root-commit) abc1234] init', 0)[0]).toMatchObject({ sha: 'abc1234', branch: 'main', refs: [] })
+  expect(commitsInRun('git -C /r commit -m "a #3"', '[b 1111111] a #3', 0)[0]?.refs).toEqual([3])
+  expect(commitsInRun('echo "git commit"', '[b 1111111] a', 0)).toEqual([])
+  expect(commitsInRun('git log --oneline', '[b 1111111] a', 0)).toEqual([])
+})
+
+test('keeps the last commit when amend repeats the subject on a branch', async () => {
+  const run = (text: string) => ({ role: 'assistant', text: '', toolUses: [{ tool: 'Bash', input: { command: 'git commit --amend --no-edit' }, text }] })
+  const list = collectCommits([run('[b 1111111] same'), run('[b 2222222] same'), run('[c 3333333] same')])
+  expect(list.map(one => one.sha)).toEqual(['2222222', '3333333'])
+})
+
+test('links commits by number first, then by the PR head branch', async () => {
+  const ref = (number: number, isPull: boolean) => ({ key: `o/r#${number}`, owner: 'o', repo: 'r', number, isPull, url: '', order: 0, sources: [], actions: [] })
+  const metas = { 'o/r#12': { title: '', state: 'open', isPull: true, stateReason: '', isDraft: false, branch: 'feat/10-x', additions: 0, deletions: 0, ci: 'none' as const } }
+  const one = (sha: string, branch: string, refs: number[]) => ({ sha, branch, subject: sha, refs, order: 0 })
+  const linked = linkCommits([one('a', 'feat/10-x', [10]), one('b', 'feat/10-x', []), one('c', 'other', [99])], [ref(10, false), ref(12, true)], metas)
+  expect(linked.byKey['o/r#10']?.map(c => c.sha)).toEqual(['a'])
+  expect(linked.byKey['o/r#12']?.map(c => c.sha)).toEqual(['b'])
+  expect(linked.unlinked.map(c => c.sha)).toEqual(['c'])
+})
 
 test('finds skill runs and why they ran', async () => {
   const hits = collectSkillHits([
