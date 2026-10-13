@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { ActionEntry, Plan, QueryRun } from '../types'
-import { actionOf, commandText, movePage, pageIndex, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
+import { actionOf, plainText, commandText, movePage, pageIndex, outputText, answerLine, executedPart, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
@@ -506,6 +506,26 @@ for (const surface of ['terminal', 'desktop'] as const) {
     pane = await render()
     expect(pane).toContain('  4 / 4  ')
     expect(pane).toContain('ls four')
+  })
+}
+
+test('removes control characters that a surface cannot draw', async () => {
+  expect(plainText('\x1b[31mred\x1b[0m ok')).toBe('red ok')
+  expect(plainText('a\r\nb')).toBe('a\nb')
+  expect(plainText('10%\r50%\r100%\ndone')).toBe('100%\ndone')
+  expect(plainText('\x1b]8;;https://x\x07link\x1b]8;;\x07 bell\x07')).toBe('link bell')
+  expect(plainText('tab\tkept')).toBe('tab\tkept')
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`draws the log when a command prints colors on ${surface}`, async ($, on) => {
+    on('tool.call', async () => ({ result: { stdout: '\x1b[31mred\x1b[0m\r\nok\x07', stderr: '', interrupted: false } }) as any)
+    on('process.run', async () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }) as any)
+    on('session.cwd', async () => ({ value: '/tmp' }) as any)
+    await ($.tool.call as any)({ tool: 'Bash', description: '색 출력', command: 'ls --color' } as any)
+    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(pane).toContain('▌ 명령')
+    expect(pane).toContain('{"source":"red\\nok","language":"text"}')
   })
 }
 

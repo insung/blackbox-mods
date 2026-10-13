@@ -770,8 +770,21 @@ export function commandText(command: string): string {
 }
 
 /** 출력을 앞 몇 줄, 줄마다 앞부분으로 줄인다 */
+/** 화면에 그릴 수 있는 글로 바꾼다: ANSI 이스케이프를 지우고, 줄 안의 \r 은 마지막 부분만 남기며, 탭·줄바꿈 밖의 제어 문자를 지운다. 제어 문자가 남으면 패널 전체가 그려지지 않는다 */
+export function plainText(text: string): string {
+  return text
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '')
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b[@-_]?/g, '')
+    .replace(/\r+\n/g, '\n')
+    .split('\n')
+    .map(line => line.slice(line.lastIndexOf('\r') + 1))
+    .join('\n')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+}
+
 export function outputText(output: string, total: number): string {
-  const lines = output.split('\n').slice(0, ACTION_OUTPUT_LINES)
+  const lines = plainText(output).split('\n').slice(0, ACTION_OUTPUT_LINES)
   const shown = lines.map(line => (line.length > ACTION_OUTPUT_WIDTH ? `${line.slice(0, ACTION_OUTPUT_WIDTH)}…` : line)).join('\n')
   return total > ACTION_OUTPUT_LINES ? `${shown}\n… (전체 ${total}줄)` : shown
 }
@@ -1215,14 +1228,14 @@ export const register: Register = (on, options) => {
                         {head('명령', KIND_COLOR.command)}
                         {field('목적', action.note || '(설명 없음)', !action.note)}
                         <Text bold italic>실행:</Text>
-                        <Code source={commandText(action.target)} language="bash" />
+                        <Code source={plainText(commandText(action.target))} language="bash" />
                         <Text bold italic color={action.status === 'done' ? undefined : 'error'}>{`결과:${mark}${output ? '' : ' (출력 없음)'}`}</Text>
                         {output !== '' && <Code source={outputText(output, action.outputLines ?? 0)} language="text" />}
                       </Box>
                     )
                   }
                   const run = item.run
-                  const lines = run.output.split('\n')
+                  const lines = plainText(run.output).split('\n')
                   const isCut = lines.length > OUTPUT_LINES
                   return (
                     <Box flexDirection="column">
@@ -1230,7 +1243,7 @@ export const register: Register = (on, options) => {
                       {field('목적', run.purpose || run.goal)}
                       {field('대상', `DB ${run.database} · 테이블 ${run.tables}`)}
                       <Text bold italic>실행:</Text>
-                      <Code source={run.sql} language="sql" />
+                      <Code source={plainText(run.sql)} language="sql" />
                       <Text bold italic color={run.status === 'failed' || run.status === 'denied' ? 'error' : undefined}>
                         {`결과:${run.status === 'failed' ? ' (실패)' : run.status === 'denied' ? ' (거부됨)' : ''}`}
                       </Text>
