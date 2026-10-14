@@ -207,6 +207,38 @@ export type Agreement = {
 
 export type TabId = 'log' | 'decisions' | 'issues' | 'tree' | 'skills' | 'agreements'
 
+/** 프로세스가 끝나도 남기는 패널 기록. 세션 시작 때 다시 계산하는 값(워크 트리, Git, 스킬 사용량)은 뺀다 */
+export type SavedRecords = {
+  turns: Turn[]
+  reads: ReadEntry[]
+  runs: QueryRun[]
+  actions: ActionEntry[]
+  plans: Plan[]
+  places: string[]
+  decisions: Decision[]
+  agreements: Agreement[]
+  lastPrompt: string
+  tab: TabId
+  logPage: string
+}
+
+/** `$.store` 의 `session:<세션 id>` 키에 두는 값 */
+export type SavedSession = {
+  /** 저장 형식 판. 다른 판이면 복원하지 않는다 */
+  v: 1
+  /** 마지막으로 저장한 시각(ISO). 보관 기간과 삭제 순서를 이 값으로 정한다 */
+  updatedAt: string
+  records: SavedRecords
+}
+
+/** 보관 규칙을 정할 때 보는 다른 세션 기록 하나 */
+export type StoredEntry = {
+  key: string
+  updatedAt: string
+  /** 저장소 JSON 에서 이 항목이 차지하는 바이트 수 */
+  bytes: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'blackbox-mods': {

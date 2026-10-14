@@ -1,7 +1,7 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
-import type { ActionEntry, Plan, QueryRun } from '../types'
-import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex } from '../hooks/register'
+import type { ActionEntry, Plan, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
+import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
@@ -749,3 +749,193 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(after).not.toContain('암묵적 합의 (1)')
   })
 }
+
+const DAY = 24 * 60 * 60 * 1000
+const NOW = Date.parse('2026-10-14T00:00:00.000Z')
+const ago = (ms: number) => new Date(NOW - ms).toISOString()
+
+function emptyRecords(): SavedRecords {
+  return { turns: [], reads: [], runs: [], actions: [], plans: [], places: [], decisions: [], agreements: [], lastPrompt: '', tab: 'log', logPage: '' }
+}
+
+test('deletes other sessions last updated more than 30 days ago and keeps newer ones', async () => {
+  const others: StoredEntry[] = [
+    { key: 'session:old', updatedAt: ago(31 * DAY), bytes: 10 },
+    { key: 'session:edge', updatedAt: ago(30 * DAY), bytes: 10 },
+    { key: 'session:new', updatedAt: ago(1 * DAY), bytes: 10 },
+    { key: 'session:broken', updatedAt: '', bytes: 10 },
+  ]
+  expect(keysToDelete(others, 'session:now', 10, NOW)).toEqual(['session:old', 'session:broken'])
+  expect(KEEP_MS).toBe(30 * DAY)
+})
+
+test('never deletes the current session, however old its last update is', async () => {
+  const others: StoredEntry[] = [{ key: 'session:now', updatedAt: ago(90 * DAY), bytes: 10 }]
+  expect(keysToDelete(others, 'session:now', 10, NOW)).toEqual([])
+  expect(keysToDelete(others, 'session:now', STORE_BUDGET * 2, NOW, { maxAgeMs: KEEP_MS, budget: STORE_BUDGET })).toEqual([])
+})
+
+test('over the size limit, deletes the oldest other sessions first and stops once under it', async () => {
+  const others: StoredEntry[] = [
+    { key: 'session:b', updatedAt: ago(2 * DAY), bytes: 40 },
+    { key: 'session:a', updatedAt: ago(3 * DAY), bytes: 40 },
+    { key: 'session:c', updatedAt: ago(1 * DAY), bytes: 40 },
+  ]
+  const limits = { maxAgeMs: KEEP_MS, budget: 100 }
+  // 합계 30 + 120 = 150: a(가장 오래됨) 를 지워 110, b 를 지워 70 에서 멈춘다
+  expect(keysToDelete(others, 'session:now', 30, NOW, limits)).toEqual(['session:a', 'session:b'])
+  // 합계가 한도 아래면 지우지 않는다
+  expect(keysToDelete(others, 'session:now', 0, NOW, { maxAgeMs: KEEP_MS, budget: 200 })).toEqual([])
+  // 현재 세션 하나로 한도를 넘으면 다른 세션을 모두 지우지만 현재 세션은 남긴다
+  expect(keysToDelete(others, 'session:now', 500, NOW, limits)).toEqual(['session:a', 'session:b', 'session:c'])
+})
+
+test('counts JSON size in UTF-8 bytes', async () => {
+  expect(jsonBytes('a')).toBe(3)
+  expect(jsonBytes('가')).toBe(5)
+  expect(jsonBytes('😀')).toBe(6)
+  expect(entryBytes('k', 1)).toBe(jsonBytes('k') + 1 + 2)
+  expect(sessionKey('abc')).toBe('session:abc')
+})
+
+test('shrinks an oversized session before saving and keeps decisions and agreements', async () => {
+  const big = 'x'.repeat(200_000)
+  const records: SavedRecords = {
+    ...emptyRecords(),
+    runs: Array.from({ length: 20 }, (_, n) => ({ id: `q${n}`, turn: 1, t: n, at: '', goal: '', purpose: '', database: '', tables: '', sql: 'SELECT 1', status: 'done' as const, output: big })),
+    actions: [{ id: 'c1', t: 1, at: '', turn: 1, kind: 'command', target: 'ls', note: '', status: 'done', output: big, outputLines: 1 }],
+    decisions: [{ id: 'd1', t: 1, at: '', turn: 1, question: '남길까', options: [], recommended: '', status: 'pending', answer: '', userQuote: '', decidedAt: '', quoteTurn: 0, decidedBy: 'user', source: 'tool' }],
+  }
+  const budget = 1024 * 1024
+  expect(jsonBytes(records)).toBeGreaterThan(budget)
+  const shrunk = shrinkRecords(records, budget)
+  expect(jsonBytes(shrunk)).toBeLessThanOrEqual(budget)
+  expect(shrunk.runs).toHaveLength(20)
+  expect(shrunk.runs[0]?.output.length).toBeLessThan(big.length)
+  expect(shrunk.runs[0]?.output).toContain('저장 한도를 넘어 잘림')
+  expect(shrunk.decisions).toEqual(records.decisions)
+  // 작은 기록은 그대로 둔다
+  expect(shrinkRecords(emptyRecords(), budget)).toEqual(emptyRecords())
+  // 잘라도 넘으면 오래된 로그부터 뺀다
+  const tiny = shrinkRecords(records, 20_000)
+  expect(jsonBytes(tiny)).toBeLessThanOrEqual(20_000)
+  expect(tiny.decisions).toEqual(records.decisions)
+  expect(tiny.runs.at(-1)?.id).toBe('q19')
+})
+
+test('reads back only saved sessions of this format', async () => {
+  expect(savedRecordsOf({ v: 1, updatedAt: '', records: { turns: [] } })).toEqual({ turns: [] })
+  expect(savedRecordsOf({ v: 2, updatedAt: '', records: {} })).toBeUndefined()
+  expect(savedRecordsOf('x')).toBeUndefined()
+  expect(savedRecordsOf(undefined)).toBeUndefined()
+})
+
+/** 테스트가 들여다볼 수 있는 메모리 저장소. $.store 의 get·set·delete·keys 에 답한다 */
+function memoryStore(on: any, entries: Record<string, unknown> = {}) {
+  const store = new Map<string, unknown>(Object.entries(entries))
+  const deleted: string[] = []
+  on('store.get', async (_$: unknown, e: any) => ({ value: store.get(e.key) }) as any)
+  on('store.set', async (_$: unknown, e: any) => {
+    store.set(e.key, JSON.parse(JSON.stringify(e.value)))
+    return { value: undefined } as any
+  })
+  on('store.delete', async (_$: unknown, e: any) => {
+    store.delete(e.key)
+    deleted.push(e.key)
+    return { value: undefined } as any
+  })
+  on('store.keys', async () => ({ value: [...store.keys()] }) as any)
+  return { store, deleted }
+}
+
+/** session.start 가 부르는 등록 호출과 시작 자체에 답한다 */
+function startable(on: any) {
+  on('command.register', async () => ({ value: undefined }) as any)
+  on('tool.register', async () => ({ value: undefined }) as any)
+  on('session.start', async () => ({ cwd: '/tmp' }) as any)
+}
+
+function quietTools(on: any) {
+  on('process.run', async () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }) as any)
+  on('session.cwd', async () => ({ value: '/tmp' }) as any)
+  on('session.root', async () => ({ value: '/tmp' }) as any)
+  on('session.messages', async () => ({ value: [] }) as any)
+}
+
+test('saves records to the store a moment after they change, and deletes expired sessions', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  const { store, deleted } = memoryStore(on, {
+    'session:old': { v: 1, updatedAt: new Date(Date.now() - 31 * DAY).toISOString(), records: emptyRecords() },
+    'session:recent': { v: 1, updatedAt: new Date(Date.now() - 2 * DAY).toISOString(), records: emptyRecords() },
+  })
+  on('session.id', async () => ({ value: 's1' }) as any)
+  quietTools(on)
+  await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__track_decisions', items: [{ question: '저장할까', status: 'pending', decidedBy: 'user' }] })
+  expect(store.get('session:s1')).toBeUndefined()
+  await clock.advance(1000)
+  const saved = store.get('session:s1') as SavedSession
+  expect(saved?.v).toBe(1)
+  expect(saved.records.decisions[0]?.id).toBe('d1')
+  expect(Number.isFinite(Date.parse(saved.updatedAt))).toBe(true)
+  expect(deleted).toEqual(['session:old'])
+  expect(store.has('session:recent')).toBe(true)
+})
+
+test('restores the same session at start, and new decision and agreement ids continue', async ($, on) => {
+  const records: SavedRecords = {
+    ...emptyRecords(),
+    turns: [{ n: 1, t: 1, at: '09:00', prompt: '어제 요청', summary: '어제 요청' }],
+    decisions: [{ id: 'd1', t: 1, at: '09:00', turn: 1, question: '어제 결정', options: [], recommended: '', status: 'pending', answer: '', userQuote: '', decidedAt: '', quoteTurn: 0, decidedBy: 'user', source: 'tool' }],
+    agreements: [{ id: 'a1', t: 1, at: '09:00', turn: 1, statement: '어제 합의', kind: 'scope', evidence: '', status: 'assumed', note: '', userQuote: '', quoteTurn: 0, decidedAt: '' }],
+  }
+  startable(on)
+  const { deleted } = memoryStore(on, {
+    'session:s1': { v: 1, updatedAt: new Date().toISOString(), records },
+    'session:other': { v: 1, updatedAt: new Date().toISOString(), records: { ...emptyRecords(), decisions: [] } },
+  })
+  on('session.id', async () => ({ value: 's1' }) as any)
+  quietTools(on)
+  await ($.session as any).start({ cwd: '/tmp' })
+  const decided = await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__track_decisions', items: [{ question: '오늘 결정', status: 'pending', decidedBy: 'user' }] })
+  expect(JSON.stringify(decided)).toContain('d2')
+  const agreed = await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__track_agreements', items: [{ statement: '오늘 합의', kind: 'scope', evidence: '', status: 'assumed' }] })
+  expect(JSON.stringify(agreed)).toContain('a2')
+  const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any))
+  expect(pane).toContain('d1. 어제 결정')
+  expect(pane).toContain('d2. 오늘 결정')
+  expect(deleted).toEqual([])
+})
+
+test('a new session starts empty even when other sessions are saved', async ($, on) => {
+  startable(on)
+  memoryStore(on, { 'session:other': { v: 1, updatedAt: new Date().toISOString(), records: { ...emptyRecords(), turns: [{ n: 1, t: 1, at: '', prompt: '남의 요청', summary: '남의 요청' }] } } })
+  on('session.id', async () => ({ value: 'fresh' }) as any)
+  quietTools(on)
+  await ($.session as any).start({ cwd: '/tmp' })
+  const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any))
+  expect(pane).not.toContain('남의 요청')
+})
+
+test('a failed save does not stop the panel', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  on('store.keys', async () => {
+    throw new Error('disk full')
+  })
+  on('session.id', async () => ({ value: 's1' }) as any)
+  quietTools(on)
+  const ran = await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__track_decisions', items: [{ question: '저장 실패해도', status: 'pending', decidedBy: 'user' }] })
+  await clock.advance(1000)
+  expect(JSON.stringify(ran)).toContain('d1')
+  const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any))
+  expect(pane).toContain('d1. 저장 실패해도')
+})
+
+test('saves at once when a turn completes, without waiting for the delay', async ($, on) => {
+  const { store } = memoryStore(on)
+  on('session.id', async () => ({ value: 's1' }) as any)
+  on('turn.complete', async () => ({ text: '' }) as any)
+  quietTools(on)
+  await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__track_agreements', items: [{ statement: '바로 저장', kind: 'method', evidence: '', status: 'assumed' }] })
+  await ($.turn as any).complete({ answer: '끝', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer', agentId: 'sub' })
+  expect((store.get('session:s1') as SavedSession)?.records.agreements[0]?.id).toBe('a1')
+})

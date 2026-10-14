@@ -65,6 +65,25 @@ Automatic records (no tool call needed): Bash commands that run `run_query.py` o
 
 References that GitHub answers with 404 are hidden.
 
+## Record storage
+
+Panel records are also kept on disk. When the desktop app pauses a session that sat idle for 15 minutes, or Claude Code restarts, reopening the same session shows the earlier records again.
+
+- Location: Claude Code's `$.store`, a JSON file of this plugin's own under the Claude Code configuration directory (`~/.claude/` by default). Each session has one key, `session:<session id>`, holding its records and the time of its last save (`updatedAt`).
+- When it saves: one second after records change, when a turn completes, and when the session ends.
+- Restore: when a session starts, the records saved under the same session id go back into the panel. A new session starts with an empty panel. Records of other sessions are not read.
+- What it saves: the session log (requests, queries, commands and files, files read, plans), decisions, implicit agreements, the places the work tree tab uses, the last user request, and the tab and page in view. The Git, work tree and skill usage tabs are read again from the conversation and git when a session starts, so they are not saved.
+
+The plugin code applies the retention rules itself, when a session starts and on every save. There is no separate script to run.
+
+| Rule | What it does |
+| --- | --- |
+| 30-day retention | Deletes other sessions whose last save is more than 30 days old |
+| 4 MiB in total | `$.store` takes at most 4 MiB of JSON per plugin. When all session records together exceed the limit less a 256 KiB margin (3.75 MiB), other sessions are deleted one at a time, oldest last save first, until the total is under it. It never deletes everything |
+| Current session | The current session's records are never deleted. If the current session alone exceeds the limit, the saved copy has large text such as query and command output cut (`… (저장 한도를 넘어 잘림)`), then the oldest session log items dropped if still too large. Decisions and implicit agreements are kept. The records shown in the panel are not reduced |
+
+A failed save does not stop the panel. The unsaved change is written on the next save.
+
 ## Settings
 
 | Option | Default | Meaning |
@@ -77,6 +96,7 @@ Set it with `/plugin configure blackbox-mods@blackbox-mods`, or with `--config g
 
 - The query detection and the query purpose rule are tuned for one team's database tooling (`run_query.py`, `mysql`). Other tools are not recorded yet.
 - Records are kept per session. Sessions do not share them.
+- Records lost before this feature was added cannot be brought back.
 - Requests sent before the mod loaded have no summary and are grouped as "(no request record)".
 
 ## Development
