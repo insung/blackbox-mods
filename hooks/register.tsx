@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { ActionEntry, Agreement, Decision, SessionCommit, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, TabId, TreeView, Turn, Worktree } from '../types'
+import type { ActionEntry, Agreement, Decision, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn, Worktree } from '../types'
 
 const LOG_PANE = 'blackbox-mods'
 const TABS: { id: TabId; label: string }[] = [
@@ -85,6 +85,240 @@ const lastPrompt = atom({ plugin: 'blackbox-mods', key: 'lastPrompt' } as const,
 const tab = atom({ plugin: 'blackbox-mods', key: 'tab' } as const, 'log' as TabId)
 const logPage = atom({ plugin: 'blackbox-mods', key: 'logPage' } as const, '')
 let githubUser = ''
+
+/** ── 기록 저장: 프로세스가 끝나도 같은 세션을 다시 열면 패널 기록이 보이게 `$.store` 에 남긴다 ── */
+const SESSION_PREFIX = 'session:'
+/** `$.store` 의 전체 한도. 이를 넘는 set 은 실패한다 */
+export const STORE_LIMIT = 4 * 1024 * 1024
+/** 한도 계산이 호스트와 조금 달라도 넘지 않도록 남기는 여유 */
+export const STORE_BUDGET = STORE_LIMIT - 256 * 1024
+/** 마지막 갱신 뒤 이 기간이 지난 다른 세션 기록을 지운다 */
+export const KEEP_MS = 30 * 24 * 60 * 60 * 1000
+/** 기록이 바뀐 뒤 저장까지 기다리는 시간. 바뀔 때마다 디스크에 쓰지 않는다 */
+const SAVE_DELAY_MS = 1000
+/** 저장할 때 큰 값을 자른 자리에 붙이는 표시 */
+const CUT_MARK = '\n… (저장 한도를 넘어 잘림)'
+/** 저장 대상 atom 의 key. 이 atom 이 바뀌면 저장을 예약한다 */
+const SAVED_KEYS = new Set(['turns', 'reads', 'runs', 'actions', 'plans', 'places', 'decisions', 'agreements', 'lastPrompt', 'tab', 'logPage'])
+
+export function sessionKey(id: string): string {
+  return `${SESSION_PREFIX}${id}`
+}
+
+/** JSON 글의 UTF-8 바이트 수 */
+export function jsonBytes(value: unknown): number {
+  const text = JSON.stringify(value) ?? ''
+  let bytes = 0
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (code < 0x80) bytes += 1
+    else if (code < 0x800) bytes += 2
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4
+      i++
+    } else bytes += 3
+  }
+  return bytes
+}
+
+/** 저장소 JSON(`{"key":value,…}`)에서 항목 하나가 차지하는 바이트 수 */
+export function entryBytes(key: string, value: unknown): number {
+  return jsonBytes(key) + jsonBytes(value) + 2
+}
+
+/**
+ * 지울 다른 세션 기록의 key 를 고른다. 현재 세션 key 는 고르지 않는다.
+ * 1) 마지막 갱신 뒤 maxAgeMs 가 지난 기록(갱신 시각을 읽을 수 없는 기록 포함)
+ * 2) 남은 기록과 keptBytes(현재 세션 등 지우지 않는 값)의 합이 budget 을 넘으면, 마지막 갱신이 오래된 기록부터 하나씩. 합이 budget 아래가 되면 멈춘다
+ */
+export function keysToDelete(
+  others: readonly StoredEntry[],
+  currentKey: string,
+  keptBytes: number,
+  now: number,
+  limits: { maxAgeMs: number; budget: number } = { maxAgeMs: KEEP_MS, budget: STORE_BUDGET },
+): string[] {
+  const timeOf = (entry: StoredEntry) => {
+    const time = Date.parse(entry.updatedAt)
+    return Number.isFinite(time) ? time : 0
+  }
+  const candidates = others.filter(entry => entry.key !== currentKey)
+  const expired = candidates.filter(entry => now - timeOf(entry) > limits.maxAgeMs)
+  const kept = candidates.filter(entry => !expired.includes(entry)).sort((a, b) => timeOf(a) - timeOf(b))
+  let total = keptBytes + kept.reduce((sum, entry) => sum + entry.bytes, 0)
+  const oldest: string[] = []
+  for (const entry of kept) {
+    if (total <= limits.budget) break
+    oldest.push(entry.key)
+    total -= entry.bytes
+  }
+  return [...expired.map(entry => entry.key), ...oldest]
+}
+
+function cutText(text: string, size: number): string {
+  return typeof text === 'string' && text.length > size ? `${text.slice(0, size)}${CUT_MARK}` : text
+}
+
+/**
+ * 기록이 budget 바이트를 넘으면 줄인다. 패널의 기록(메모리)은 그대로 두고 저장할 사본만 줄인다.
+ * 1) 쿼리·명령 결과처럼 큰 글을 차례로 더 짧게 자른다
+ * 2) 그래도 넘으면 세션 로그 목록(쿼리, 명령·파일, 읽은 파일, 계획, 요청)의 오래된 절반씩을 뺀다. 결정 사항과 암묵적 합의는 남긴다
+ */
+export function shrinkRecords(records: SavedRecords, budget: number): SavedRecords {
+  if (jsonBytes(records) <= budget) return records
+  let next = records
+  for (const size of [4000, 1000, 200]) {
+    next = {
+      ...next,
+      runs: next.runs.map(run => ({ ...run, output: cutText(run.output, size), sql: cutText(run.sql, size) })),
+      actions: next.actions.map(action => ({ ...action, output: cutText(action.output, size), target: cutText(action.target, size) })),
+      reads: next.reads.map(entry => ({ ...entry, purpose: cutText(entry.purpose, size), result: cutText(entry.result, size) })),
+      turns: next.turns.map(turn => ({ ...turn, prompt: cutText(turn.prompt, size) })),
+      lastPrompt: cutText(next.lastPrompt, size),
+    }
+    if (jsonBytes(next) <= budget) return next
+  }
+  const newerHalf = <T,>(list: T[]) => list.slice(Math.ceil(list.length / 2))
+  while (jsonBytes(next) > budget) {
+    const logs = [next.runs, next.actions, next.reads, next.plans]
+    if (logs.some(list => list.length > 0)) {
+      next = { ...next, runs: newerHalf(next.runs), actions: newerHalf(next.actions), reads: newerHalf(next.reads), plans: newerHalf(next.plans) }
+    } else if (next.turns.length > 0) {
+      next = { ...next, turns: newerHalf(next.turns) }
+    } else {
+      break
+    }
+  }
+  return next
+}
+
+/** 저장된 값이 이 판의 세션 기록이면 그 기록을, 아니면 undefined */
+export function savedRecordsOf(value: unknown): Partial<SavedRecords> | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const saved = value as Partial<SavedSession>
+  if (saved.v !== 1 || !saved.records || typeof saved.records !== 'object') return undefined
+  return saved.records
+}
+
+let saveTimer: { cancel: () => void } | undefined
+let isDirty = false
+/** 복원하며 쓰는 동안에는 저장을 예약하지 않는다. 열기만 해서는 마지막 갱신 시각이 바뀌지 않는다 */
+let isRestoring = false
+let saving: Promise<void> = Promise.resolve()
+
+/** 첫 변경 뒤 SAVE_DELAY_MS 에 한 번 저장한다. 그사이의 변경은 같은 저장에 실린다 */
+function scheduleSave($: EngineInterface): void {
+  if (isRestoring) return
+  isDirty = true
+  if (saveTimer) return
+  try {
+    saveTimer = $.clock.after(SAVE_DELAY_MS, () => {
+      saveTimer = undefined
+      void flushSave($)
+    })
+  } catch {
+    saveTimer = undefined
+  }
+}
+
+/** 예약을 기다리지 않고 지금 저장한다. 저장은 하나씩 차례로 하고, 실패해도 패널 동작을 막지 않는다 */
+function flushSave($: EngineInterface, sessionId?: string): Promise<void> {
+  saveTimer?.cancel()
+  saveTimer = undefined
+  if (!isDirty) return saving
+  saving = saving
+    .then(() => saveNow($, sessionId))
+    .catch(() => {
+      isDirty = true
+    })
+  return saving
+}
+
+async function savedRecords($: EngineInterface): Promise<SavedRecords> {
+  return {
+    turns: await read($, turns),
+    reads: await read($, reads),
+    runs: await read($, runs),
+    actions: await read($, actions),
+    plans: await read($, plans),
+    places: await read($, places),
+    decisions: await read($, decisions),
+    agreements: await read($, agreements),
+    lastPrompt: await read($, lastPrompt),
+    tab: await read($, tab),
+    logPage: await read($, logPage),
+  }
+}
+
+/** 현재 세션 밖의 저장 항목: 세션 기록은 갱신 시각·크기와 함께, 그 밖의 값은 크기만 */
+async function otherEntries($: EngineInterface, currentKey: string): Promise<{ entries: StoredEntry[]; keptBytes: number }> {
+  const entries: StoredEntry[] = []
+  let keptBytes = 0
+  for (const key of await $.store.keys()) {
+    if (key === currentKey) continue
+    const value = await $.store.get(key)
+    const bytes = entryBytes(key, value)
+    if (!key.startsWith(SESSION_PREFIX)) {
+      keptBytes += bytes
+      continue
+    }
+    const updatedAt = value && typeof value === 'object' ? String((value as Partial<SavedSession>).updatedAt ?? '') : ''
+    entries.push({ key, updatedAt, bytes })
+  }
+  return { entries, keptBytes }
+}
+
+/** 보관 규칙에 따라 다른 세션 기록을 지운다 */
+async function pruneOthers($: EngineInterface, currentKey: string, currentBytes: number, others: { entries: StoredEntry[]; keptBytes: number }) {
+  for (const key of keysToDelete(others.entries, currentKey, others.keptBytes + currentBytes, Date.now())) {
+    await $.store.delete(key)
+  }
+}
+
+async function saveNow($: EngineInterface, sessionId?: string): Promise<void> {
+  const id = sessionId || (await $.session.id())
+  if (!id) return
+  isDirty = false
+  const key = sessionKey(id)
+  const others = await otherEntries($, key)
+  const records = shrinkRecords(await savedRecords($), STORE_BUDGET - others.keptBytes - jsonBytes(key) - 200)
+  const value: SavedSession = { v: 1, updatedAt: new Date().toISOString(), records }
+  await pruneOthers($, key, entryBytes(key, value), others)
+  await $.store.set(key, value)
+}
+
+/** 세션 시작: 같은 세션의 저장 기록을 패널에 되돌리고, 보관 규칙에 따라 다른 세션 기록을 지운다 */
+async function restoreSession($: EngineInterface): Promise<void> {
+  const id = await $.session.id()
+  if (!id) return
+  const key = sessionKey(id)
+  const stored = await $.store.get(key)
+  const saved = savedRecordsOf(stored)
+  // 핫 리로드처럼 메모리에 이미 기록이 있으면 덮어쓰지 않는다
+  const memory = await savedRecords($)
+  const isEmpty = [memory.turns, memory.reads, memory.runs, memory.actions, memory.plans, memory.places, memory.decisions, memory.agreements].every(list => list.length === 0)
+  if (saved && isEmpty) {
+    isRestoring = true
+    try {
+      const listOf = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : [])
+      const textOf = (value: unknown) => (typeof value === 'string' ? value : '')
+      await update($, turns, () => listOf<Turn>(saved.turns))
+      await update($, reads, () => listOf<ReadEntry>(saved.reads))
+      await update($, runs, () => listOf<QueryRun>(saved.runs))
+      await update($, actions, () => listOf<ActionEntry>(saved.actions))
+      await update($, plans, () => listOf<Plan>(saved.plans))
+      await update($, places, () => listOf<string>(saved.places))
+      await update($, decisions, () => listOf<Decision>(saved.decisions))
+      await update($, agreements, () => listOf<Agreement>(saved.agreements))
+      await update($, lastPrompt, () => textOf(saved.lastPrompt))
+      await update($, tab, () => (TABS.some(one => one.id === saved.tab) ? (saved.tab as TabId) : 'log'))
+      await update($, logPage, () => textOf(saved.logPage))
+    } finally {
+      isRestoring = false
+    }
+  }
+  await pruneOthers($, key, stored === undefined ? 0 : entryBytes(key, stored), await otherEntries($, key))
+}
 
 type Found = { owner: string; repo: string; number: number; isPull?: boolean; action?: string }
 
@@ -1181,9 +1415,26 @@ export const register: Register = (on, options) => {
       },
       isDeferred: false,
     })
+    // 워크 트리가 쓰는 places 도 복원 대상이라, 새로 읽기 전에 복원한다. 실패해도 빈 패널로 시작한다
+    await restoreSession($).catch(() => undefined)
     void refreshTree($).catch(() => undefined)
     void refreshIssues($).catch(() => undefined)
     void refreshSkills($).catch(() => undefined)
+
+    return next(e)
+  })
+
+  // 저장 대상 기록이 바뀌면 저장을 예약한다
+  on('state.set', { plugin: 'blackbox-mods' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (SAVED_KEYS.has(e.key)) scheduleSave($)
+
+    return ran
+  })
+
+  // 프로세스가 끝나기 전에 아직 저장하지 않은 변경을 남긴다. 종료는 짧은 시간 안에 끝나야 해, 남은 시간이 적으면 건너뛴다
+  on('session.end', async ($, e, next) => {
+    if (next.budget.remainingMs > 300) await flushSave($, e.sessionId).catch(() => undefined)
 
     return next(e)
   })
@@ -1283,6 +1534,8 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const ran = await next(e)
+    // 답변이 끝나면 예약을 기다리지 않고 저장한다. 다음 입력 전에 프로세스가 멈춰도 이 턴까지는 남는다
+    await flushSave($).catch(() => undefined)
     if (e.agentId === undefined) {
       await refreshIssues($).catch(() => undefined)
       await refreshSkills($).catch(() => undefined)
