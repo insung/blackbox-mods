@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { ActionEntry, Agreement, Decision, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn, Worktree } from '../types'
+import type { ActionEntry, Agreement, Decision, Hypothesis, StepRef, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn, Worktree } from '../types'
 
 const LOG_PANE = 'blackbox-mods'
 const TABS: { id: TabId; label: string }[] = [
@@ -53,6 +53,8 @@ const AGREEMENT_RULE = [
 const READ_RULE = [
   'Read 도구로 파일을 읽어 결론을 냈으면, 그 요청의 답을 끝내기 전에 note_reads 도구로 목적(왜 읽었는지)과 결과(읽고 내린 결론)를 각각 한두 줄로 보낸다. 읽은 파일 경로는 도구가 자동으로 모은다.',
   'show_plan 의 단계에는 다이어그램에 쓸 10자 안팎의 label 을 함께 보낸다.',
+  '여러 단계 작업은 다음 단계의 도구를 쓰기 전에 show_plan 으로 끝난 단계를 done, 시작할 단계를 doing 으로 바꿔 보낸다. 패널은 파일 읽기·명령·쿼리 기록을 그때 doing 인 단계에 묶는다. 단계를 넘기기 전에 그 단계에서 읽은 파일의 note_reads 를 보낸다.',
+  '판단 단계에서는 그 단계의 hypotheses 로 가설마다 text(내용), verdict(adopted 채택·rejected 기각·open 검토 중), evidence(근거 한 줄)를 보낸다.',
 ].join('\n')
 
 const PURPOSE_RULE = [
@@ -976,6 +978,18 @@ export function separator(title: string, width: number): string {
 }
 
 const BOX_MARK: Record<PlanStep['status'], string> = { todo: ' ', doing: '▶', done: '✓', skipped: '✗' }
+const VERDICT_LABEL: Record<Hypothesis['verdict'], string> = { adopted: '채택', rejected: '기각', open: '검토 중' }
+
+export function hypothesesOf(input: unknown[]): Hypothesis[] {
+  return input
+    .map(one => one as { text?: unknown; verdict?: unknown; evidence?: unknown })
+    .map(one => ({
+      text: String(one?.text ?? '').trim(),
+      verdict: (['adopted', 'rejected', 'open'] as const).find(v => v === one?.verdict) ?? 'open',
+      evidence: String(one?.evidence ?? '').trim(),
+    }))
+    .filter(one => one.text)
+}
 
 export function levelsOf(steps: PlanStep[]): number[] {
   const levels: number[] = []
@@ -986,24 +1000,33 @@ export function levelsOf(steps: PlanStep[]): number[] {
   return levels
 }
 
+export function stepLabel(step: PlanStep): string {
+  return step.label || (step.text.length > 12 ? `${step.text.slice(0, 12)}…` : step.text)
+}
+
 /**
- * 단계마다 한 줄인 흐름 그림. 같은 단계에서 나란히 하는 일은 + 로 한 줄에 잇고, 폭을 넘으면 + 앞에서 줄을 바꾼다
+ * 단계마다 한 줄인 흐름 그림. 상자에는 상태, 단계 번호, 라벨을 쓴다. 같은 단계에서 나란히 하는 일은 + 로 한 줄에 잇고,
+ * 폭을 넘으면 + 앞에서 줄을 바꾼다. 가설이 있는 단계는 그 줄 아래에 가설과 판정을 단다
  *
- * [✓ 계획]
- *   ──> [▶ 수정] + [ 검토]
- *   ──> [ 승인]
+ * [✓ 1. 계획]
+ *   ──> [▶ 2. 수정] + [ 3. 검토]
+ *         ├─ 3-A 가설: … → 기각 (근거)
+ *         └─ 3-B 가설: … → 채택 (근거)
+ *   ──> [ 4. 승인]
  */
 export function planDiagram(steps: PlanStep[], width: number): string {
   const levels = levelsOf(steps)
-  const groups: string[][] = []
-  steps.forEach((step, index) => {
-    const label = step.label || (step.text.length > 12 ? `${step.text.slice(0, 12)}…` : step.text)
-    ;(groups[levels[index] ?? 0] ??= []).push(`[${BOX_MARK[step.status]} ${label}]`)
+  const groups: number[][] = []
+  steps.forEach((_step, index) => {
+    ;(groups[levels[index] ?? 0] ??= []).push(index)
   })
   const lines: string[] = []
   groups.forEach((group, index) => {
     let line = index === 0 ? '' : '  ──> '
-    group.forEach((box, n) => {
+    group.forEach((at, n) => {
+      const step = steps[at]
+      if (!step) return
+      const box = `[${BOX_MARK[step.status]} ${at + 1}. ${stepLabel(step)}]`
       if (n > 0 && columnsOf(`${line} + ${box}`) > width) {
         lines.push(line)
         line = `      + ${box}`
@@ -1012,6 +1035,14 @@ export function planDiagram(steps: PlanStep[], width: number): string {
       }
     })
     lines.push(line)
+    for (const at of group) {
+      const hypotheses = steps[at]?.hypotheses ?? []
+      hypotheses.forEach((one, n) => {
+        const branch = n === hypotheses.length - 1 ? '└─' : '├─'
+        const id = `${at + 1}-${String.fromCharCode(65 + (n % 26))}`
+        lines.push(`        ${branch} ${id} 가설: ${one.text} → ${VERDICT_LABEL[one.verdict]}${one.evidence ? ` (${one.evidence})` : ''}`)
+      })
+    }
   })
   return lines.join('\n')
 }
@@ -1028,14 +1059,42 @@ export function movePage(keys: string[], selected: string, step: number): string
   return at < 0 || at === keys.length - 1 ? '' : (keys[at] ?? '')
 }
 
+/** 이 요청에서 마지막으로 갱신된 계획의 진행 중(doing) 단계. 나란히 진행 중이면 앞 단계. 없으면 undefined */
+export function activeStep(list: Plan[], turn: number): StepRef | undefined {
+  for (const plan of [...list].reverse()) {
+    if (plan.turn !== turn) continue
+    const index = plan.steps.findIndex(step => step.status === 'doing')
+    if (index >= 0) return { goal: plan.goal, n: index + 1 }
+  }
+  return undefined
+}
+
+export function sameStep(x: StepRef | undefined, y: StepRef | undefined): boolean {
+  return x?.goal === y?.goal && x?.n === y?.n
+}
+
+/** 기록이 이 계획의 단계 중 하나에 속하는지 */
+export function sameStepIn(plan: Plan, step: StepRef | undefined): boolean {
+  return step !== undefined && step.goal === plan.goal && step.n >= 1 && step.n <= plan.steps.length
+}
+
+function stepOfItem(item: { kind: string; run?: QueryRun; entry?: ReadEntry; action?: ActionEntry }): StepRef | undefined {
+  return item.run?.step ?? item.entry?.step ?? item.action?.step
+}
+
+async function stepNow($: EngineInterface, turn: number): Promise<StepRef | undefined> {
+  return activeStep(await read($, plans), turn)
+}
+
 async function recordRead($: EngineInterface, file: string): Promise<void> {
   const turn = await currentTurn($)
+  const step = await stepNow($, turn)
   await update($, reads, list => {
     const last = list.at(-1)
-    if (last && last.turn === turn) {
+    if (last && last.turn === turn && sameStep(last.step, step)) {
       return last.files.includes(file) ? list : [...list.slice(0, -1), { ...last, files: [...last.files, file] }]
     }
-    const entry: ReadEntry = { id: `r${Date.now()}`, t: Date.now(), at: timeNow(), turn, files: [file], purpose: '', result: '' }
+    const entry: ReadEntry = { id: `r${Date.now()}`, t: Date.now(), at: timeNow(), turn, files: [file], purpose: '', result: '', ...(step ? { step } : {}) }
     return [...list, entry].slice(-100)
   })
 }
@@ -1049,9 +1108,9 @@ export function planText(plan: Plan): string {
     .join('\n')
 }
 
-/** 같은 목표의 계획은 처음 기록한 자리에서 마지막 상태로 덮어쓴다. 목표가 다르면 새로 넣는다 */
+/** 같은 요청의 같은 목표 계획은 처음 기록한 자리에서 마지막 상태로 덮어쓴다. 요청이나 목표가 다르면 새로 넣어, 요청마다 그 요청 끝의 상태가 남는다 */
 export function upsertPlan(list: Plan[], plan: Plan): Plan[] {
-  const same = list.findIndex(one => one.goal === plan.goal)
+  const same = list.findIndex(one => one.goal === plan.goal && one.turn === plan.turn)
   if (same < 0) return [...list, plan].slice(-50)
   return list.map((one, index) => (index === same ? { ...plan, id: one.id, t: one.t, at: one.at, turn: one.turn } : one))
 }
@@ -1301,7 +1360,9 @@ export function mdField(name: string, value: string): string {
 async function recordAction($: EngineInterface, e: { tool: string } & Record<string, unknown>, ran: ActionRan) {
   const action = actionOf(e, ran)
   if (!action) return
-  const entry: ActionEntry = { ...action, t: Date.now(), at: timeNow(), turn: await currentTurn($) }
+  const turn = await currentTurn($)
+  const step = await stepNow($, turn)
+  const entry: ActionEntry = { ...action, t: Date.now(), at: timeNow(), turn, ...(step ? { step } : {}) }
   await update($, actions, list => [...list, entry].slice(-200))
 }
 
@@ -1314,9 +1375,12 @@ async function record($: EngineInterface, e: { command: string; description?: st
       () => `-- ${file} (파일을 읽지 못함)\n${sql}`,
     )
   }
+  const turn = await currentTurn($)
+  const step = await stepNow($, turn)
   const run: QueryRun = {
+    ...(step ? { step } : {}),
     id: e.tool_use_id,
-    turn: await currentTurn($),
+    turn,
     t: Date.now(),
     at: timeNow(),
     goal: e.description?.trim() || '(목표 설명 없음)',
@@ -1375,6 +1439,19 @@ export const register: Register = (on, options) => {
                   type: 'array',
                   items: { type: 'integer' },
                   description: '이 단계가 기다리는 앞 단계 번호(1부터). 빈 배열이면 시작 단계. 빼면 바로 앞 단계',
+                },
+                hypotheses: {
+                  type: 'array',
+                  description: '판단 단계에서 세운 가설과 판정. 흐름 그림의 그 단계 아래에 보인다',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      text: { type: 'string', description: '가설 내용 한 줄' },
+                      verdict: { type: 'string', enum: ['adopted', 'rejected', 'open'], description: 'adopted 채택, rejected 기각, open 검토 중' },
+                      evidence: { type: 'string', description: '판정 근거 한 줄' },
+                    },
+                    required: ['text', 'verdict'],
+                  },
                 },
               },
               required: ['text', 'status'],
@@ -1606,6 +1683,7 @@ export const register: Register = (on, options) => {
               ? [index]
               : [],
           status: (['todo', 'doing', 'done', 'skipped'] as const).includes(step?.status) ? step.status : 'todo',
+          ...(Array.isArray(step?.hypotheses) && step.hypotheses.length > 0 ? { hypotheses: hypothesesOf(step.hypotheses) } : {}),
         }))
       : []
     const plan: Plan = { id: e.tool_use_id, t: Date.now(), at: timeNow(), turn: await currentTurn($), goal: String(input.goal ?? ''), steps }
@@ -1731,6 +1809,76 @@ export const register: Register = (on, options) => {
         <Markdown text={`## ${mdInline(heading)}`} />
       </Box>
     )
+    type LogItem = (typeof entries)[number]
+    /** 기록 머리. main 은 ▌ 큰 머리, sub 는 단계 묶음 안의 ▸ 작은 머리, none 은 머리 없음 */
+    const head = (name: string, color: string, level: 'main' | 'sub' | 'none') =>
+      level === 'none' ? null : (
+        <Box flexDirection="row" marginTop={level === 'main' ? 1 : 0}>
+          <Text bold color={color}>{`${level === 'main' ? '▌' : '▸'} ${name}`}</Text>
+        </Box>
+      )
+    const entryView = (item: LogItem, level: 'main' | 'sub' | 'none') => {
+      if (item.kind === 'plan') return null
+      if (item.kind === 'read') {
+        const entry = item.entry
+        const text = [
+          mdField('목적', entry.purpose || '(Claude 가 아직 정리하지 않음)'),
+          ...(entry.files.length > 0 ? ['- **읽은 파일:**', ...entry.files.map(file => `  - ${mdInline(file)}`)] : []),
+          mdField('결과', entry.result || '(Claude 가 아직 정리하지 않음)'),
+        ].join('\n')
+        return (
+          <Box flexDirection="column">
+            {head('파일 읽기', KIND_COLOR.read, level)}
+            <Markdown text={text} />
+          </Box>
+        )
+      }
+      if (item.kind === 'action') {
+        const action = item.action
+        const mark = action.status === 'failed' ? ' (실패)' : action.status === 'denied' ? ' (거부됨)' : ''
+        if (action.kind === 'file') {
+          return (
+            <Box flexDirection="column">
+              {head(`파일 ${action.note}`, KIND_COLOR.file, level)}
+              <Text color={KIND_COLOR.file}>{level === 'none' ? `파일 ${action.note}: ${action.target}` : `  ${action.target}`}</Text>
+            </Box>
+          )
+        }
+        const output = action.output ?? ''
+        const text = [
+          mdField('목적', action.note || '(설명 없음)'),
+          '- **실행:**',
+          mdFence(plainText(commandText(action.target)), 'bash'),
+          `- **결과:**${mark}${output ? '' : ' (출력 없음)'}`,
+          ...(output !== '' ? [mdFence(outputText(output, action.outputLines ?? 0), 'text')] : []),
+        ].join('\n')
+        return (
+          <Box flexDirection="column">
+            {head('명령', KIND_COLOR.command, level)}
+            <Markdown text={text} />
+          </Box>
+        )
+      }
+      const run = item.run
+      const lines = plainText(run.output).split('\n')
+      const isCut = lines.length > OUTPUT_LINES
+      const mark = run.status === 'failed' ? ' (실패)' : run.status === 'denied' ? ' (거부됨)' : run.status === 'running' ? ' 실행 중…' : ''
+      const text = [
+        mdField('목적', run.purpose || run.goal),
+        mdField('대상', `DB ${run.database} · 테이블 ${run.tables}`),
+        '- **실행:**',
+        mdFence(plainText(run.sql), 'sql'),
+        `- **결과:**${mark}`,
+      ].join('\n')
+      return (
+        <Box flexDirection="column">
+          {head('쿼리', KIND_COLOR.query, level)}
+          <Markdown text={text} />
+          {run.status !== 'running' && <Markdown text={lines.slice(0, OUTPUT_LINES).join('\n')} />}
+          {isCut && <Text dimColor>{`결과 앞 ${OUTPUT_LINES}줄만 보인다 (전체 ${lines.length}줄)`}</Text>}
+        </Box>
+      )
+    }
     const choose = async (id: TabId) => {
       await update($, tab, () => id)
       if (id === 'tree') await refreshTree($).catch(() => undefined)
@@ -1760,87 +1908,32 @@ export const register: Register = (on, options) => {
                 <Button key="log-next" label="Next ▶" dimColor={page === logGroups.length - 1} onPress={() => turnPage(1)} />
               </Box>
             )}
-            {shownGroups.map(group => (
-              <Box flexDirection="column" marginBottom={1}>
-                {groupHead(group.at, group.heading)}
-                {group.items.map(item => {
-                  const head = (name: string, color: string) => (
-                    <Box flexDirection="row" marginTop={1}>
-                      <Text bold color={color}>{`▌ ${name}`}</Text>
-                    </Box>
-                  )
-                  if (item.kind === 'plan') {
-                    return (
-                      <Box flexDirection="column">
-                        {head('계획', KIND_COLOR.plan)}
-                        <Markdown text={mdField('목표', item.plan.goal)} />
-                        <Text bold>{planDiagram(item.plan.steps, width)}</Text>
-                        <Text dimColor>{planText(item.plan)}</Text>
-                      </Box>
-                    )
-                  }
-                  if (item.kind === 'read') {
-                    const entry = item.entry
-                    const text = [
-                      mdField('목적', entry.purpose || '(Claude 가 아직 정리하지 않음)'),
-                      ...(entry.files.length > 0 ? ['- **읽은 파일:**', ...entry.files.map(file => `  - ${mdInline(file)}`)] : []),
-                      mdField('결과', entry.result || '(Claude 가 아직 정리하지 않음)'),
-                    ].join('\n')
-                    return (
-                      <Box flexDirection="column">
-                        {head('파일 읽기', KIND_COLOR.read)}
-                        <Markdown text={text} />
-                      </Box>
-                    )
-                  }
-                  if (item.kind === 'action') {
-                    const action = item.action
-                    const mark = action.status === 'failed' ? ' (실패)' : action.status === 'denied' ? ' (거부됨)' : ''
-                    if (action.kind === 'file') {
-                      return (
-                        <Box flexDirection="column">
-                          {head(`파일 ${action.note}`, KIND_COLOR.file)}
-                          <Text color={KIND_COLOR.file}>{`  ${action.target}`}</Text>
-                        </Box>
-                      )
-                    }
-                    const output = action.output ?? ''
-                    const text = [
-                      mdField('목적', action.note || '(설명 없음)'),
-                      '- **실행:**',
-                      mdFence(plainText(commandText(action.target)), 'bash'),
-                      `- **결과:**${mark}${output ? '' : ' (출력 없음)'}`,
-                      ...(output !== '' ? [mdFence(outputText(output, action.outputLines ?? 0), 'text')] : []),
-                    ].join('\n')
-                    return (
-                      <Box flexDirection="column">
-                        {head('명령', KIND_COLOR.command)}
-                        <Markdown text={text} />
-                      </Box>
-                    )
-                  }
-                  const run = item.run
-                  const lines = plainText(run.output).split('\n')
-                  const isCut = lines.length > OUTPUT_LINES
-                  const mark = run.status === 'failed' ? ' (실패)' : run.status === 'denied' ? ' (거부됨)' : run.status === 'running' ? ' 실행 중…' : ''
-                  const text = [
-                    mdField('목적', run.purpose || run.goal),
-                    mdField('대상', `DB ${run.database} · 테이블 ${run.tables}`),
-                    '- **실행:**',
-                    mdFence(plainText(run.sql), 'sql'),
-                    `- **결과:**${mark}`,
-                  ].join('\n')
-                  return (
-                    <Box flexDirection="column">
-                      {head('쿼리', KIND_COLOR.query)}
-                      <Markdown text={text} />
-                      {run.status !== 'running' && <Markdown text={lines.slice(0, OUTPUT_LINES).join('\n')} />}
-                      {isCut && <Text dimColor>{`결과 앞 ${OUTPUT_LINES}줄만 보인다 (전체 ${lines.length}줄)`}</Text>}
-                    </Box>
-                  )
-                })}
-              </Box>
-            ))}
+            {shownGroups.map(group => {
+              const planItems = group.items.flatMap(item => (item.kind === 'plan' ? [item.plan] : []))
+              const records = group.items.filter(item => item.kind !== 'plan')
+              const isInPlan = (item: LogItem) => planItems.some(plan => sameStepIn(plan, stepOfItem(item)))
+              const outside = records.filter(item => !isInPlan(item))
+              const section = (title: string, items: LogItem[]) =>
+                items.length === 0 ? [] : [head(title, KIND_COLOR.plan, 'main'), ...items.map(item => entryView(item, items.length > 1 ? 'sub' : 'none'))]
+              return (
+                <Box flexDirection="column" marginBottom={1}>
+                  {groupHead(group.at, group.heading)}
+                  {planItems.length === 0 && records.map(item => entryView(item, 'main'))}
+                  {planItems.flatMap(plan => [
+                    head('작업 계획', KIND_COLOR.plan, 'main'),
+                    <Markdown text={mdField('목표', plan.goal)} />,
+                    <Text bold>{planDiagram(plan.steps, width)}</Text>,
+                    ...plan.steps.flatMap((step, index) =>
+                      section(
+                        `${index + 1}. ${stepLabel(step)}`,
+                        records.filter(item => sameStep(stepOfItem(item), { goal: plan.goal, n: index + 1 })),
+                      ),
+                    ),
+                  ])}
+                  {planItems.length > 0 && section('단계 밖', outside)}
+                </Box>
+              )
+            })}
           </Box>
         )}
         {current === 'decisions' && (
