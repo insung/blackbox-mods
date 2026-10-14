@@ -260,6 +260,8 @@ declare module 'claude-code' {
       logPage: string
       decisions: Decision[]
       agreements: Agreement[]
+      /** 암묵적 합의 탭에서 한 번에 답하려고 고른 항목 id */
+      pickedAgreements: string[]
       lastPrompt: string
     }
   }

@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { ActionEntry, Plan, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
+import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
@@ -449,8 +449,8 @@ test('draws a plan as an ascii flow and a separator line', async () => {
     { text: '테스트를 고친다', label: '테스트', status: 'todo' as const, after: [1] },
     { text: '사용자 승인', label: '승인', status: 'todo' as const, after: [2, 3] },
   ]
-  expect(planDiagram(steps, 80)).toBe('[✓ 계획] ──> [▶ 수정] + [  테스트] ──> [  승인]')
-  expect(planDiagram(steps, 20).split('\n')[1]?.startsWith('  ──> ')).toBe(true)
+  expect(planDiagram(steps, 80)).toBe('[✓ 계획]\n  ──> [▶ 수정] + [  테스트]\n  ──> [  승인]')
+  expect(planDiagram(steps, 20)).toBe('[✓ 계획]\n  ──> [▶ 수정]\n      + [  테스트]\n  ──> [  승인]')
   expect(columnsOf('가a')).toBe(3)
   expect(separator('요청', 20)).toBe(`── 요청 ${'─'.repeat(12)}`)
   expect(shortSummary('짧은 요청')).toBe('짧은 요청')
@@ -471,24 +471,19 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'Bash', description: '배치 폴더 확인', command: 'ls batch' } as any)
     await ($.tool.call as any)({ tool: 'Edit', file_path: '/Users/b/mi/a.py', old_string: 'x', new_string: 'y' } as any)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(pane).toContain('카카오톡 DAU 조회')
+    expect(pane).toContain('{"type":"Markdown","props":{"text":"## 카카오톡 DAU 조회"}}')
     expect(pane.match(/── \[/g)?.length).toBe(1)
-    expect(pane).toContain('"목적: "]},{"type":"Text","props":{"dimColor":false},"children":["배치 폴더 확인"]')
+    expect(pane).toContain('"children":["▌ 명령"]')
+    expect(pane).toContain('- **목적:** 배치 폴더 확인\\n- **실행:**\\n  ```bash\\n  ls batch\\n  ```\\n- **결과:**\\n  ```text\\n  | a |\\n  |---|\\n  | 1 |\\n  ```')
     expect(pane).toContain('▌ 명령')
-    expect(pane).toContain('"실행:"')
-    expect(pane).toContain('{"source":"ls batch","language":"bash"}')
-    expect(pane).toContain('{"source":"| a |\\n|---|\\n| 1 |","language":"text"}')
     expect(pane).toContain('▌ 파일 수정')
     expect(pane).toContain('  /Users/b/mi/a.py')
     expect(pane).toContain('▌ 쿼리')
     expect(pane).toContain('▌ 파일 읽기')
-    expect(pane).toContain('"bold":true,"italic":true},"children":["목적: "]')
     expect(pane).not.toContain('run_query.py')
-    expect(pane).toContain('"children":["날짜별 OS별 사용자수"]')
+    expect(pane).toContain('- **목적:** 날짜별 OS별 사용자수\\n- **대상:** DB web\\\\_mihd · 테이블 t\\n- **실행:**\\n  ```sql')
     expect(pane).toContain('SELECT a FROM t')
-    expect(pane).toContain('읽은 파일:')
-    expect(pane).toContain('/Users/b/mi/.worktree/x/README.md')
-    expect(pane).toContain('"children":["기준일이 -2일로 바뀌었다"]')
+    expect(pane).toContain('- **목적:** 배치 문서 확인\\n- **읽은 파일:**\\n  - /Users/b/mi/.worktree/x/README.md\\n- **결과:** 기준일이 -2일로 바뀌었다')
     expect(pane).not.toContain('결정 대기')
   })
 }
@@ -554,6 +549,24 @@ for (const surface of ['terminal', 'desktop'] as const) {
 test('builds the answer line for a picked option', async () => {
   expect(answerLine('d2', '프롬프트 창에 채우기', '')).toBe('d2: 프롬프트 창에 채우기')
   expect(answerLine('d2', 'A', '그리고 이것도  \n')).toBe('그리고 이것도\nd2: A')
+  expect(answerLine('a1, a3', '맞음', '')).toBe('a1, a3: 맞음')
+})
+
+test('toggles picked agreements and keeps only the ones still waiting, in list order', async () => {
+  expect(togglePick([], 'a1')).toEqual(['a1'])
+  expect(togglePick(['a1', 'a3'], 'a1')).toEqual(['a3'])
+  const list = [
+    { id: 'a1', status: 'assumed' },
+    { id: 'a2', status: 'confirmed' },
+    { id: 'a3', status: 'assumed' },
+  ] as any
+  expect(pickedIds(['a3', 'a2', 'a1', 'a9'], list)).toEqual(['a1', 'a3'])
+})
+
+test('writes markdown list fields and fenced blocks that survive backticks', async () => {
+  expect(mdField('목적', '소스 *위치* 찾기')).toBe('- **목적:** 소스 \\*위치\\* 찾기')
+  expect(mdFence('echo `a`', 'bash')).toBe('  ```bash\n  echo `a`\n  ```')
+  expect(mdFence('x ``` y', 'text')).toBe('  ````text\n  x ``` y\n  ````')
 })
 
 for (const surface of ['terminal', 'desktop'] as const) {
@@ -643,7 +656,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'Bash', description: '색 출력', command: 'ls --color' } as any)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('▌ 명령')
-    expect(pane).toContain('{"source":"red\\nok","language":"text"}')
+    expect(pane).toContain('- **결과:**\\n  ```text\\n  red\\n  ok\\n  ```')
   })
 }
 
@@ -734,18 +747,42 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(before).toContain('▶ 세션 로그')
     expect(before).toContain('암묵적 합의 (1)')
     expect(before.indexOf('스킬 사용량')).toBeLessThan(before.indexOf('암묵적 합의'))
+    await ($.tool.call as any)({
+      tool: 'mcp__blackbox-mods__track_agreements',
+      items: [
+        { statement: '둘째 전제', kind: 'scope', evidence: '근거 2', status: 'assumed' },
+        { statement: '셋째 전제', kind: 'term', evidence: '근거 3', status: 'assumed' },
+      ],
+    })
     await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-agreements', surface } as any)
-    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    const render = async () => JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    const pane = await render()
     expect(pane).toContain('[?] a1. (작업 방식) 등록 시 탭을 바꾸지 않는다')
     expect(pane).toContain('근거: 사용자가 이의 없이 진행')
     expect(pane).toContain('암묵적 합의: 아무도 묻지 않았지만')
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a1-no', surface } as any)
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a1-yes', surface } as any)
-    expect(fills).toEqual(['a1: 아님', 'a1: 맞음'])
-    await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__track_agreements', items: [{ id: 'a1', status: 'confirmed' }] })
-    const after = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(pane.indexOf('a1.')).toBeLessThan(pane.indexOf('a3.'))
+    expect(pane).toContain('선택 0건')
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'picked-yes', surface } as any)
+    expect(fills).toEqual([])
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a1', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a2', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a3', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a2', surface } as any)
+    const picking = await render()
+    expect(picking).toContain('선택 2건')
+    expect(picking).toContain('▶ [?] a1.')
+    expect(picking).toContain('  [?] a2.')
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'picked-yes', surface } as any)
+    expect(fills).toEqual(['a1, a3: 맞음'])
+    expect(await render()).toContain('선택 0건')
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'agree-a2', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'picked-no', surface } as any)
+    expect(fills).toEqual(['a1, a3: 맞음', 'a2: 아님'])
+    await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__track_agreements', items: [{ id: 'a1', status: 'confirmed' }, { id: 'a2', status: 'confirmed' }, { id: 'a3', status: 'confirmed' }] })
+    const after = await render()
     expect(after).toContain('[o] a1.')
-    expect(after).not.toContain('agree-a1-yes')
+    expect(after).not.toContain('agree-a1')
+    expect(after).not.toContain('선택 맞음')
     expect(after).not.toContain('암묵적 합의 (1)')
   })
 }

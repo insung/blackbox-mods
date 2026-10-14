@@ -47,6 +47,7 @@ const AGREEMENT_RULE = [
   '사용자가 묻거나 답하지 않았지만 Claude 가 작업의 전제로 삼은 내용(진행 전제, 범위, 용어, 작업 방식, 요청 해석, 답 형식)이 생기면, 답변을 끝내기 전에 track_agreements 도구로 status assumed 로 등록한다. 근거(사용자 발언 인용 또는 관찰한 사실)를 함께 보낸다.',
   '명시적으로 묻고 답한 항목은 track_decisions 로만 등록한다. 이미 등록한 합의는 다시 등록하지 않고 그 id 로 갱신한다.',
   '사용자가 `a1: 맞음` 이라고 하면 그 항목을 status confirmed 로, `a1: 아님` 이라고 하면 status revoked 로 갱신하고 note 에 바뀐 전제와 그에 따라 할 일을 쓴다. 철회된 전제로 이미 한 작업은 다시 확인한다.',
+  '사용자가 `a1, a3: 맞음` 처럼 여러 id 를 쉼표로 이어 답하면 각 id 에 같은 답을 한 것으로 보고 한 번의 track_agreements 호출로 모두 갱신한다.',
 ].join('\n')
 
 const READ_RULE = [
@@ -81,6 +82,7 @@ const skillHits = atom({ plugin: 'blackbox-mods', key: 'skillHits' } as const, [
 const skillsAt = atom({ plugin: 'blackbox-mods', key: 'skillsAt' } as const, '')
 const decisions = atom({ plugin: 'blackbox-mods', key: 'decisions' } as const, [] as Decision[])
 const agreements = atom({ plugin: 'blackbox-mods', key: 'agreements' } as const, [] as Agreement[])
+const pickedAgreements = atom({ plugin: 'blackbox-mods', key: 'pickedAgreements' } as const, [] as string[])
 const lastPrompt = atom({ plugin: 'blackbox-mods', key: 'lastPrompt' } as const, '')
 const tab = atom({ plugin: 'blackbox-mods', key: 'tab' } as const, 'log' as TabId)
 const logPage = atom({ plugin: 'blackbox-mods', key: 'logPage' } as const, '')
@@ -984,7 +986,13 @@ export function levelsOf(steps: PlanStep[]): number[] {
   return levels
 }
 
-/** [✓ 계획] ──> [▶ 수정] + [ 검토] ──> [ 승인] 형태. 같은 단계에서 나란히 하는 일은 + 로 잇는다 */
+/**
+ * 단계마다 한 줄인 흐름 그림. 같은 단계에서 나란히 하는 일은 + 로 한 줄에 잇고, 폭을 넘으면 + 앞에서 줄을 바꾼다
+ *
+ * [✓ 계획]
+ *   ──> [▶ 수정] + [ 검토]
+ *   ──> [ 승인]
+ */
 export function planDiagram(steps: PlanStep[], width: number): string {
   const levels = levelsOf(steps)
   const groups: string[][] = []
@@ -993,18 +1001,18 @@ export function planDiagram(steps: PlanStep[], width: number): string {
     ;(groups[levels[index] ?? 0] ??= []).push(`[${BOX_MARK[step.status]} ${label}]`)
   })
   const lines: string[] = []
-  let line = ''
   groups.forEach((group, index) => {
-    const part = group.join(' + ')
-    const joint = index === 0 ? '' : ' ──> '
-    if (line && columnsOf(line + joint + part) > width) {
-      lines.push(line)
-      line = `  ──> ${part}`
-    } else {
-      line += joint + part
-    }
+    let line = index === 0 ? '' : '  ──> '
+    group.forEach((box, n) => {
+      if (n > 0 && columnsOf(`${line} + ${box}`) > width) {
+        lines.push(line)
+        line = `      + ${box}`
+      } else {
+        line += n === 0 ? box : ` + ${box}`
+      }
+    })
+    lines.push(line)
   })
-  if (line) lines.push(line)
   return lines.join('\n')
 }
 
@@ -1160,6 +1168,24 @@ async function pickOption($: EngineInterface, id: string, option: string): Promi
   if (!filled.isFilled) $.ui.toast(`프롬프트 창을 채우지 못했다. 직접 입력한다: ${id}: ${option}`)
 }
 
+/** 고른 합의 id 목록에서 id 를 넣거나 뺀다 */
+export function togglePick(picked: string[], id: string): string[] {
+  return picked.includes(id) ? picked.filter(one => one !== id) : [...picked, id]
+}
+
+/** 고른 id 중 아직 확인 대기인 것만 합의 목록 순서대로 남긴다 */
+export function pickedIds(picked: string[], list: Agreement[]): string[] {
+  return list.filter(one => one.status === 'assumed' && picked.includes(one.id)).map(one => one.id)
+}
+
+/** 고른 합의를 `a1, a3: 맞음` 한 줄로 프롬프트 창에 채우고 고른 것을 비운다 */
+async function answerPicked($: EngineInterface, option: string): Promise<void> {
+  const ids = pickedIds(await read($, pickedAgreements), await read($, agreements))
+  if (ids.length === 0) return
+  await pickOption($, ids.join(', '), option)
+  await update($, pickedAgreements, () => [])
+}
+
 async function openInVsCode($: EngineInterface, path: string): Promise<void> {
   const ran = await $.process.run(['sh', '-c', OPEN_IN_VSCODE, 'sh', path], { timeoutMs: 15000 }).catch(error => ({
     exitCode: 1,
@@ -1253,6 +1279,23 @@ export function outputText(output: string, total: number): string {
   const lines = plainText(output).split('\n').slice(0, ACTION_OUTPUT_LINES)
   const shown = lines.map(line => (line.length > ACTION_OUTPUT_WIDTH ? `${line.slice(0, ACTION_OUTPUT_WIDTH)}…` : line)).join('\n')
   return total > ACTION_OUTPUT_LINES ? `${shown}\n… (전체 ${total}줄)` : shown
+}
+
+/** Markdown 한 줄 안에 그대로 보이도록 서식 기호를 이스케이프한다 */
+export function mdInline(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().replace(/([\\`*_[\]<>#|~])/g, '\\$1')
+}
+
+/** 목록 항목 아래에 들어가는 코드 블록. 내용 속 백틱보다 긴 울타리를 쓰고 두 칸 들여 쓴다 */
+export function mdFence(text: string, language: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map(run => run.length))
+  const fence = '`'.repeat(Math.max(3, longest + 1))
+  return [`${fence}${language}`, ...text.split('\n'), fence].map(line => `  ${line}`).join('\n')
+}
+
+/** `- 이름: 값` 목록 한 줄 */
+export function mdField(name: string, value: string): string {
+  return `- **${name}:** ${mdInline(value)}`
 }
 
 async function recordAction($: EngineInterface, e: { tool: string } & Record<string, unknown>, ran: ActionRan) {
@@ -1614,9 +1657,10 @@ export const register: Register = (on, options) => {
     const width = Math.max(30, Math.min(100, (e.props?.bodyColumns ?? 80) - 2))
     const turnList = await read($, turns)
     const turnOf = (n: number) => turnList.find(one => one.n === n)
-    const titleOf = (n: number, at: string) => {
+    /** 요청 묶음 머리: 요청 시각 구분선과 그 아래 요청 요약 제목 */
+    const headOf = (n: number, at: string) => {
       const turn = turnOf(n)
-      return turn ? `[${turn.at}] ${turn.summary}` : `[${at}] (요청 기록 없음)`
+      return { at: turn?.at ?? at, heading: turn?.summary ?? '(요청 기록 없음)' }
     }
     const allDecisions = await read($, decisions)
     const entries = [
@@ -1625,13 +1669,13 @@ export const register: Register = (on, options) => {
       ...(await read($, reads)).map(entry => ({ kind: 'read' as const, t: entry.t, turn: entry.turn, at: entry.at, entry })),
       ...(await read($, actions)).map(action => ({ kind: 'action' as const, t: action.t, turn: action.turn, at: action.at, action })),
     ].sort((x, y) => x.t - y.t)
-    const logGroups: { key: string; title: string; items: typeof entries }[] = []
+    const logGroups: { key: string; at: string; heading: string; items: typeof entries }[] = []
     for (const item of entries) {
       // 요청 기록 전의 항목(turn 0)은 한 묶음으로 모은다
       const key = `turn-${item.turn}`
       const last = logGroups.at(-1)
       if (last && last.key === key) last.items.push(item)
-      else logGroups.push({ key, title: titleOf(item.turn, item.at), items: [item] })
+      else logGroups.push({ key, ...headOf(item.turn, item.at), items: [item] })
     }
     const logKeys = logGroups.map(group => group.key)
     const selectedPage = await read($, logPage)
@@ -1647,13 +1691,14 @@ export const register: Register = (on, options) => {
     decisionGroups.reverse()
     const pendingCount = allDecisions.filter(one => one.status === 'pending').length
     const allAgreements = await read($, agreements)
-    const agreementGroups: { turn: number; title: string; items: Agreement[] }[] = []
+    // 오래된 요청 묶음부터 시간순으로 보인다
+    const agreementGroups: { turn: number; at: string; heading: string; items: Agreement[] }[] = []
     for (const one of allAgreements) {
       const group = agreementGroups.find(g => g.turn === one.turn && one.turn > 0)
       if (group) group.items.push(one)
-      else agreementGroups.push({ turn: one.turn, title: turnOf(one.turn)?.summary ?? `(요청 기록 없음) ${one.at}`, items: [one] })
+      else agreementGroups.push({ turn: one.turn, ...headOf(one.turn, one.at), items: [one] })
     }
-    agreementGroups.reverse()
+    const picked = pickedIds(await read($, pickedAgreements), allAgreements)
     const assumedCount = allAgreements.filter(one => one.status === 'assumed').length
     const quoteOf = (one: Decision | Agreement) => {
       const quote = one.userQuote.replace(/\s+/g, ' ').trim()
@@ -1680,6 +1725,12 @@ export const register: Register = (on, options) => {
     const hits = await read($, skillHits)
     const skillAt = await read($, skillsAt)
     const cut = (text: string, size: number) => (text.length > size ? `${text.slice(0, size)}…` : text)
+    const groupHead = (at: string, heading: string) => (
+      <Box flexDirection="column">
+        <Text bold color="claude">{separator(`[${at}]`, width)}</Text>
+        <Markdown text={`## ${mdInline(heading)}`} />
+      </Box>
+    )
     const choose = async (id: TabId) => {
       await update($, tab, () => id)
       if (id === 'tree') await refreshTree($).catch(() => undefined)
@@ -1711,25 +1762,18 @@ export const register: Register = (on, options) => {
             )}
             {shownGroups.map(group => (
               <Box flexDirection="column" marginBottom={1}>
-                <Text bold color="claude">{separator(group.title, width)}</Text>
+                {groupHead(group.at, group.heading)}
                 {group.items.map(item => {
                   const head = (name: string, color: string) => (
                     <Box flexDirection="row" marginTop={1}>
                       <Text bold color={color}>{`▌ ${name}`}</Text>
-                      <Text dimColor>{`  ${item.at}`}</Text>
-                    </Box>
-                  )
-                  const field = (name: string, value: string, isMissing = false) => (
-                    <Box flexDirection="row">
-                      <Text bold italic>{`${name}: `}</Text>
-                      <Text dimColor={isMissing}>{value}</Text>
                     </Box>
                   )
                   if (item.kind === 'plan') {
                     return (
                       <Box flexDirection="column">
                         {head('계획', KIND_COLOR.plan)}
-                        {field('목표', item.plan.goal)}
+                        <Markdown text={mdField('목표', item.plan.goal)} />
                         <Text bold>{planDiagram(item.plan.steps, width)}</Text>
                         <Text dimColor>{planText(item.plan)}</Text>
                       </Box>
@@ -1737,15 +1781,15 @@ export const register: Register = (on, options) => {
                   }
                   if (item.kind === 'read') {
                     const entry = item.entry
+                    const text = [
+                      mdField('목적', entry.purpose || '(Claude 가 아직 정리하지 않음)'),
+                      ...(entry.files.length > 0 ? ['- **읽은 파일:**', ...entry.files.map(file => `  - ${mdInline(file)}`)] : []),
+                      mdField('결과', entry.result || '(Claude 가 아직 정리하지 않음)'),
+                    ].join('\n')
                     return (
                       <Box flexDirection="column">
                         {head('파일 읽기', KIND_COLOR.read)}
-                        {field('목적', entry.purpose || '(Claude 가 아직 정리하지 않음)', !entry.purpose)}
-                        {entry.files.length > 0 && <Text bold italic>읽은 파일:</Text>}
-                        {entry.files.map(file => (
-                          <Text color={KIND_COLOR.read}>{`  ${file}`}</Text>
-                        ))}
-                        {field('결과', entry.result || '(Claude 가 아직 정리하지 않음)', !entry.result)}
+                        <Markdown text={text} />
                       </Box>
                     )
                   }
@@ -1761,35 +1805,36 @@ export const register: Register = (on, options) => {
                       )
                     }
                     const output = action.output ?? ''
+                    const text = [
+                      mdField('목적', action.note || '(설명 없음)'),
+                      '- **실행:**',
+                      mdFence(plainText(commandText(action.target)), 'bash'),
+                      `- **결과:**${mark}${output ? '' : ' (출력 없음)'}`,
+                      ...(output !== '' ? [mdFence(outputText(output, action.outputLines ?? 0), 'text')] : []),
+                    ].join('\n')
                     return (
                       <Box flexDirection="column">
                         {head('명령', KIND_COLOR.command)}
-                        {field('목적', action.note || '(설명 없음)', !action.note)}
-                        <Text bold italic>실행:</Text>
-                        <Code source={plainText(commandText(action.target))} language="bash" />
-                        <Text bold italic color={action.status === 'done' ? undefined : 'error'}>{`결과:${mark}${output ? '' : ' (출력 없음)'}`}</Text>
-                        {output !== '' && <Code source={outputText(output, action.outputLines ?? 0)} language="text" />}
+                        <Markdown text={text} />
                       </Box>
                     )
                   }
                   const run = item.run
                   const lines = plainText(run.output).split('\n')
                   const isCut = lines.length > OUTPUT_LINES
+                  const mark = run.status === 'failed' ? ' (실패)' : run.status === 'denied' ? ' (거부됨)' : run.status === 'running' ? ' 실행 중…' : ''
+                  const text = [
+                    mdField('목적', run.purpose || run.goal),
+                    mdField('대상', `DB ${run.database} · 테이블 ${run.tables}`),
+                    '- **실행:**',
+                    mdFence(plainText(run.sql), 'sql'),
+                    `- **결과:**${mark}`,
+                  ].join('\n')
                   return (
                     <Box flexDirection="column">
                       {head('쿼리', KIND_COLOR.query)}
-                      {field('목적', run.purpose || run.goal)}
-                      {field('대상', `DB ${run.database} · 테이블 ${run.tables}`)}
-                      <Text bold italic>실행:</Text>
-                      <Code source={plainText(run.sql)} language="sql" />
-                      <Text bold italic color={run.status === 'failed' || run.status === 'denied' ? 'error' : undefined}>
-                        {`결과:${run.status === 'failed' ? ' (실패)' : run.status === 'denied' ? ' (거부됨)' : ''}`}
-                      </Text>
-                      {run.status === 'running' ? (
-                        <Text dimColor>실행 중…</Text>
-                      ) : (
-                        <Markdown text={lines.slice(0, OUTPUT_LINES).join('\n')} />
-                      )}
+                      <Markdown text={text} />
+                      {run.status !== 'running' && <Markdown text={lines.slice(0, OUTPUT_LINES).join('\n')} />}
                       {isCut && <Text dimColor>{`결과 앞 ${OUTPUT_LINES}줄만 보인다 (전체 ${lines.length}줄)`}</Text>}
                     </Box>
                   )
@@ -1843,27 +1888,37 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column">
             <Text>{AGREEMENT_HELP}</Text>
             <Text dimColor>{`${assumedCount > 0 ? `확인 대기 ${assumedCount}건` : '확인 대기 없음'} · [?] 추정  [o] 맞음  [-] 아님`}</Text>
+            {assumedCount > 0 && (
+              <Box flexDirection="row" marginTop={1}>
+                <Text>{`선택 ${picked.length}건  `}</Text>
+                <Button key="picked-yes" label="선택 맞음" dimColor={picked.length === 0} onPress={() => answerPicked($, '맞음')} />
+                <Button key="picked-no" label="선택 아님" dimColor={picked.length === 0} onPress={() => answerPicked($, '아님')} />
+                <Button key="picked-clear" label="선택 해제" dimColor={picked.length === 0} onPress={() => update($, pickedAgreements, () => [])} />
+              </Box>
+            )}
+            {assumedCount > 0 && <Text dimColor>[?] 항목을 눌러 고르고 [선택 맞음]·[선택 아님] 을 누르면 프롬프트 창에 답이 채워진다. Enter 로 보낸다</Text>}
             {agreementGroups.length === 0 && <Text dimColor>아직 암묵적 합의가 없다.</Text>}
             {agreementGroups.map(group => (
               <Box flexDirection="column" marginTop={1}>
-                <Text bold color="claude">{separator(group.title, width)}</Text>
-                {group.items.map(one => (
-                  <Box flexDirection="column">
-                    <Text bold={one.status === 'assumed'} color={one.status === 'assumed' ? 'warning' : undefined} dimColor={one.status === 'revoked'}>
-                      {`${AGREEMENT_MARK[one.status]} ${one.id}. (${AGREEMENT_KIND_LABEL[one.kind]}) ${one.statement}`}
-                    </Text>
-                    {one.evidence && <Text dimColor>{`    근거: ${one.evidence}`}</Text>}
-                    {one.status === 'assumed' && (
-                      <Box flexDirection="row">
-                        <Text dimColor>    </Text>
-                        <Button key={`agree-${one.id}-yes`} label="맞음" onPress={() => pickOption($, one.id, '맞음')} />
-                        <Button key={`agree-${one.id}-no`} label="아님" onPress={() => pickOption($, one.id, '아님')} />
-                      </Box>
-                    )}
-                    {one.note && <Text>{`    => ${one.note}`}</Text>}
-                    {one.status !== 'assumed' && one.userQuote && <Text dimColor>{`    -> ${quoteOf(one)}`}</Text>}
-                  </Box>
-                ))}
+                {groupHead(group.at, group.heading)}
+                {group.items.map(one => {
+                  const line = `${AGREEMENT_MARK[one.status]} ${one.id}. (${AGREEMENT_KIND_LABEL[one.kind]}) ${one.statement}`
+                  const isPicked = picked.includes(one.id)
+                  return (
+                    <Box flexDirection="column">
+                      {one.status === 'assumed' ? (
+                        <Button key={`agree-${one.id}`} plain onPress={() => update($, pickedAgreements, list => togglePick(list, one.id))}>
+                          <Text bold color={isPicked ? 'suggestion' : 'warning'}>{`${isPicked ? '▶ ' : '  '}${line}`}</Text>
+                        </Button>
+                      ) : (
+                        <Text dimColor={one.status === 'revoked'}>{`  ${line}`}</Text>
+                      )}
+                      {one.evidence && <Text dimColor>{`      근거: ${one.evidence}`}</Text>}
+                      {one.note && <Text>{`      => ${one.note}`}</Text>}
+                      {one.status !== 'assumed' && one.userQuote && <Text dimColor>{`      -> ${quoteOf(one)}`}</Text>}
+                    </Box>
+                  )
+                })}
               </Box>
             ))}
           </Box>
