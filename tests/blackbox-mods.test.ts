@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { ActionEntry, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
+import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; actions: ActionEntry[] } = { runs: [], actions: [] }
@@ -379,10 +379,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     // 참고 줄에는 gh 명령 이름과 명령 결과를 보이지 않는다
     expect(pane).not.toContain('gh pr view')
     expect(pane).not.toContain('명령 결과')
-    // 참고 머리줄 바로 위에 구분선
-    expect(at('9a8b7c6')).toBeLessThan(at('─────'))
-    expect(at('─────')).toBeLessThan(at('참고한 이슈·PR'))
-    expect(pane.slice(at('─────'), at('참고한 이슈·PR'))).not.toContain('#')
+    // 참고 머리줄 위에 가로 구분선을 두지 않는다 (좁은 창에서 다음 줄로 넘어간다)
+    expect(pane).not.toContain('─────')
     expect(pane).not.toContain('이 세션에서 처리한 GitHub 이슈·PR 과 커밋이 없다.')
   })
 }
@@ -479,7 +477,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     } as any)
     let pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('▶ 결정 사항 (1)')
-    expect(pane).toContain('── 결정 사항을 별도 탭으로 보여 줘 ')
+    expect(pane).toContain('## 결정 사항을 별도 탭으로 보여 줘')
+    expect(pane).not.toContain('── 결정 사항을 별도 탭으로 보여 줘')
     expect(pane).toContain('[ ] d1. 도구로 결정 대기 항목을 등록할지')
     expect(pane).toContain('[x] d2. 사용자 답변 원문을 자동으로 붙인다  (Claude 가 정함)')
     await $.prompt.submit({ text: '등록하지마.' } as any).catch(() => undefined)
@@ -528,9 +527,8 @@ test('classifies skills by plugin name and folder', async () => {
   expect(classifySkill('plugin-authoring', '/private/tmp/bundled-skills/x/plugin-authoring')).toEqual({ group: 'builtin', plugin: '' })
 })
 
-test('draws a separator line and short summaries', async () => {
+test('counts columns and short summaries', async () => {
   expect(columnsOf('가a')).toBe(3)
-  expect(separator('요청', 20)).toBe(`── 요청 ${'─'.repeat(12)}`)
   expect(shortSummary('짧은 요청')).toBe('짧은 요청')
   expect(shortSummary('가'.repeat(40)).endsWith('…')).toBe(true)
 })
