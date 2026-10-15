@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { ActionEntry, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
+import { actionOf, collectCommits, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; actions: ActionEntry[] } = { runs: [], actions: [] }
@@ -122,7 +122,7 @@ test('collects issues from the transcript in first-seen order', async () => {
     },
   ])
   expect(list.map(r => r.key)).toEqual(['IGAWorksDev/dmp.crawler#40', 'o/r#3'])
-  expect(list[0]?.sources).toEqual(['사용자 프롬프트', 'gh 명령'])
+  expect(list[0]?.sources).toEqual(['사용자 프롬프트', 'gh issue view'])
   expect(list[0]?.actions).toEqual(['view'])
   expect(list[0]?.url).toBe('https://github.com/IGAWorksDev/dmp.crawler/issues/40')
 })
@@ -146,8 +146,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
     }) as any)
     on('process.run', async (_$: unknown, e: any) => {
       if (String(e.argv[2] ?? '').includes('rev-parse')) {
-        // 출력에 [branch sha] 가 없는 -q 커밋만 git 에서 찾는다
-        return { value: { exitCode: e.argv[6] === 'fix: 조용히' ? 0 : 1, stdout: '7c7c7c7\nmain fix/9 \nfix: 조용히\n\nRefs: #9\n', stderr: '' } } as any
+        // 출력에 [branch sha] 가 없는 -q 커밋은 제목으로 찾는다. 첫 줄은 커밋한 저장소의 origin
+        const sha = e.argv[5] || '7c7c7c7'
+        const body = e.argv[6] === 'fix: 조용히' || sha === '1a2b3c4' ? `${e.argv[6]}\n\nRefs: #9` : e.argv[6]
+        return { value: { exitCode: 0, stdout: `https://github.com/o/dmp.crawler.git\n${sha}\nmain fix/9 \n${body}\n`, stderr: '' } } as any
       }
       const number = e.argv.at(-1)
       const stdout =
@@ -198,7 +200,13 @@ test('groups refs by repository in the order they first appear', async () => {
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`draws one header per repository with its refs under it on ${surface}`, async ($, on) => {
     on('session.messages', async () => ({
-      value: [{ role: 'user', text: 'a/x#3 와 b/y#1, 그리고 a/x#1', toolUses: [] }],
+      value: [
+        {
+          role: 'assistant',
+          text: '',
+          toolUses: ['gh issue comment 3 --repo a/x --body t', 'gh issue close 1 --repo b/y', 'gh issue edit 1 --repo a/x --title t'].map(command => ({ tool: 'Bash', input: { command }, text: '' })),
+        },
+      ],
     }) as any)
     on('process.run', async (_$: unknown, e: any) => {
       if (e.argv[0] !== 'sh' || String(e.argv[2] ?? '').includes('rev-parse')) return { value: { exitCode: 1, stdout: '', stderr: '' } } as any
@@ -243,8 +251,8 @@ test('reads commits that a Bash call made, with the numbers in the message', asy
 test('keeps a quiet commit by its subject so git can find its SHA', async () => {
   const quiet = "git commit -q -F - <<'EOF'\nfix: 조용한 커밋\n\nRefs: #11\nEOF\ngit log --oneline -1"
   expect(commitsInRun(quiet, 'abc1234 fix: 조용한 커밋', 0)).toEqual([{ sha: '', branch: '', subject: 'fix: 조용한 커밋', refs: [11], order: 0, command: quiet }])
-  expect(parseCommitLookup('abc1234\nmain feat/11-x \nfix: 조용한 커밋\n\nRefs: #11\n', '')).toEqual({ sha: 'abc1234', branch: 'feat/11-x', refs: [11] })
-  expect(parseCommitLookup('abc1234\nmain \nx\n', 'b')).toEqual({ sha: 'abc1234', branch: 'b', refs: [] })
+  expect(parseCommitLookup('git@github.com:o/r.git\nabc1234\nmain feat/11-x \nfix: 조용한 커밋\n\nRefs: #11\n', '')).toEqual({ sha: 'abc1234', branch: 'feat/11-x', repo: 'o/r', refs: [11] })
+  expect(parseCommitLookup('\nabc1234\nmain \nx\n', 'b')).toEqual({ sha: 'abc1234', branch: 'b', repo: '', refs: [] })
   expect(parseCommitLookup('fatal: not a git repository', '')).toBe(undefined)
 })
 
@@ -257,12 +265,113 @@ test('keeps the last commit when amend repeats the subject on a branch', async (
 test('links commits by number first, then by the PR head branch', async () => {
   const ref = (number: number, isPull: boolean) => ({ key: `o/r#${number}`, owner: 'o', repo: 'r', number, isPull, url: '', order: 0, sources: [], actions: [] })
   const metas = { 'o/r#12': { title: '', state: 'open', isPull: true, stateReason: '', isDraft: false, branch: 'feat/10-x', additions: 0, deletions: 0, ci: 'none' as const } }
-  const one = (sha: string, branch: string, refs: number[]) => ({ sha, branch, subject: sha, refs, order: 0 })
-  const linked = linkCommits([one('a', 'feat/10-x', [10]), one('b', 'feat/10-x', []), one('c', 'other', [99])], [ref(10, false), ref(12, true)], metas)
+  const one = (sha: string, branch: string, refs: number[], repo = 'o/r') => ({ sha, branch, repo, subject: sha, refs, order: 0 })
+  const linked = linkCommits(
+    [one('a', 'feat/10-x', [10]), one('b', 'feat/10-x', []), one('c', 'other', [99]), one('d', 'x', [10], 'p/q'), one('e', 'feat/10-x', [10], '')],
+    [ref(10, false), ref(12, true)],
+    metas,
+  )
   expect(linked.byKey['o/r#10']?.map(c => c.sha)).toEqual(['a'])
   expect(linked.byKey['o/r#12']?.map(c => c.sha)).toEqual(['b'])
-  expect(linked.unlinked.map(c => c.sha)).toEqual(['c'])
+  // 다른 저장소의 같은 번호, 저장소를 모르는 커밋은 잇지 않는다
+  expect(linked.unlinked.map(c => c.sha)).toEqual(['c', 'd', 'e'])
 })
+
+test('reads the GitHub repository from a git remote URL', async () => {
+  expect(repoOfRemote('https://github.com/insung/blackbox-mods.git')).toBe('insung/blackbox-mods')
+  expect(repoOfRemote('git@github.com:o/r.git\n')).toBe('o/r')
+  expect(repoOfRemote('https://github.com/o/dmp.crawler')).toBe('o/dmp.crawler')
+  expect(repoOfRemote('https://gitlab.com/o/r.git')).toBe('')
+  expect(repoOfRemote('')).toBe('')
+})
+
+test('splits refs this session handled from refs it only mentioned', async () => {
+  const list = collectIssues([
+    { role: 'user', text: 'o/r#1 참고해서' },
+    { role: 'assistant', text: 'o/r#2 를 봤다', toolUses: [
+      { tool: 'Bash', input: { command: 'gh issue view 3 --repo o/r' }, text: 'see https://github.com/o/r/issues/4' },
+      { tool: 'Bash', input: { command: 'gh issue create --repo o/r --title t' }, text: 'https://github.com/o/r/issues/5' },
+      { tool: 'Bash', input: { command: 'gh pr merge 6 --repo o/r --squash' }, text: '' },
+      { tool: 'Bash', input: { command: 'gh issue view 7 --repo o/r' }, text: '' },
+    ] },
+  ])
+  const commit = { sha: 'abc1234', branch: 'b', repo: 'o/r', subject: 's', refs: [7, 8], order: 1 }
+  const all = [...list, ...refsFromCommits([commit], list)]
+  expect(all.map(r => r.key)).toEqual(['o/r#1', 'o/r#2', 'o/r#3', 'o/r#4', 'o/r#5', 'o/r#6', 'o/r#7', 'o/r#8'])
+  expect(all.find(r => r.number === 8)?.sources).toEqual(['커밋'])
+  expect(refsFromCommits([{ ...commit, repo: '' }], list)).toEqual([])
+  const { handled, consulted } = splitHandled(all, { 'o/r#7': [commit] })
+  expect(handled.map(r => r.number)).toEqual([5, 6, 7, 8])
+  expect(consulted.map(r => r.number)).toEqual([1, 2, 3, 4])
+  expect(handledActions(all[4]!, 0)).toEqual(['생성'])
+  expect(handledActions(all[5]!, 0)).toEqual(['머지'])
+  expect(handledActions(all[6]!, 1)).toEqual(['커밋'])
+  expect(handledActions(all[2]!, 0)).toEqual([])
+  expect(all[2]?.sources).toEqual(['gh issue view'])
+})
+
+test('groups handled refs and commits without an issue by repository, unknown repository last', async () => {
+  const ref = (owner: string, repo: string, number: number, order: number) => ({ key: `${owner}/${repo}#${number}`, owner, repo, number, isPull: false, url: '', order, sources: [], actions: ['create'] })
+  const commit = (sha: string, repo: string | undefined, order: number) => ({ sha, branch: 'b', repo, subject: sha, refs: [], order })
+  const groups = groupHandled([ref('a', 'x', 1, 2), ref('b', 'y', 1, 3)], [commit('c1', 'b/y', 1), commit('c2', '', 0), commit('c3', undefined, 4), commit('c4', 'c/z', 5)])
+  expect(groups.map(g => [g.repo, g.refs.map(r => r.key), g.commits.map(c => c.sha)])).toEqual([
+    ['b/y', ['b/y#1'], ['c1']],
+    ['a/x', ['a/x#1'], []],
+    ['c/z', [], ['c4']],
+    ['', [], ['c2', 'c3']],
+  ])
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`puts mentioned refs under 참고한 이슈·PR at the bottom on ${surface}`, async ($, on) => {
+    on('session.messages', async () => ({
+      value: [
+        { role: 'user', text: 'o/r#28 참고', toolUses: [] },
+        {
+          role: 'assistant',
+          text: '',
+          toolUses: [
+            { tool: 'Bash', input: { command: 'gh issue create --repo o/r --title t' }, text: 'https://github.com/o/r/issues/29' },
+            { tool: 'Bash', input: { command: 'gh pr view 27 --repo p/q' }, text: '' },
+            { tool: 'Bash', input: { command: "git commit -m 'chore: 정리'" }, text: '[main 9a8b7c6] chore: 정리' },
+            { tool: 'Bash', input: { command: "git commit -m 'docs: 문서'" }, text: '[main 1b1b1b1] docs: 문서' },
+          ],
+        },
+      ],
+    }) as any)
+    on('process.run', async (_$: unknown, e: any) => {
+      if (String(e.argv[2] ?? '').includes('rev-parse')) {
+        // 1b1b1b1 커밋을 한 폴더만 origin 이 있다
+        const origin = e.argv[5] === '1b1b1b1' ? 'https://github.com/w/z.git' : ''
+        return { value: { exitCode: 0, stdout: `${origin}\n${e.argv[5]}\nmain \n${e.argv[6]}\n`, stderr: '' } } as any
+      }
+      const [owner, repo, number] = e.argv.slice(-3)
+      return { value: { exitCode: 0, stdout: `issue\n{"title":"제목 ${owner}/${repo}#${number}","state":"OPEN","stateReason":""}`, stderr: '' } } as any
+    })
+    on('session.cwd', async () => ({ value: '/tmp' }) as any)
+    await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface } as any)
+    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    const at = (text: string) => pane.indexOf(text)
+    expect(pane).toContain('처리 1건 · 참고 2건')
+    expect(pane).toContain('▸ o/r  1건')
+    expect(pane).toContain('생성')
+    expect(pane).toContain('▸ 저장소 모름')
+    // 커밋만 있는 저장소는 머리줄에 건수를 붙이지 않는다
+    expect(pane).toContain('"▸ w/z"')
+    expect(pane).not.toContain('▸ w/z  0건')
+    expect(at('▸ w/z')).toBeLessThan(at('1b1b1b1'))
+    expect(at('1b1b1b1')).toBeLessThan(at('▸ 저장소 모름'))
+    expect(at('제목 o/r#29')).toBeLessThan(at('▸ 저장소 모름'))
+    expect(at('▸ 저장소 모름')).toBeLessThan(at('9a8b7c6'))
+    expect(at('9a8b7c6')).toBeLessThan(at('참고한 이슈·PR  2건'))
+    expect(at('참고한 이슈·PR')).toBeLessThan(at('제목 o/r#28'))
+    expect(at('참고한 이슈·PR')).toBeLessThan(at('제목 p/q#27'))
+    expect(pane).toContain('사용자 프롬프트')
+    expect(pane).toContain('gh pr view')
+    expect(pane).not.toContain('이 세션에서 처리한 GitHub 이슈·PR 과 커밋이 없다.')
+  })
+}
 
 test('finds skill runs and why they ran', async () => {
   const hits = collectSkillHits([
