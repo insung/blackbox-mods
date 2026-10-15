@@ -1351,7 +1351,6 @@ async function record($: EngineInterface, e: { command: string; description?: st
   }
   await update($, runs, list => [...list, run].slice(-50))
   await update($, tab, () => 'log' as TabId)
-  void $.ui.open({ id: LOG_PANE, title: 'Blackbox' }).catch(() => undefined)
 
   return run
 }
@@ -1500,7 +1499,6 @@ export const register: Register = (on, options) => {
       return applied.list
     })
     await update($, tab, () => 'decisions' as TabId)
-    void $.ui.open({ id: LOG_PANE, title: 'Blackbox' }).catch(() => undefined)
     const pending = (await read($, decisions)).filter(one => one.status === 'pending').length
 
     return { result: `결정 항목을 기록했다: ${ids.join(', ')} (대기 ${pending}건).` }

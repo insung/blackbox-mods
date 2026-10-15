@@ -4,7 +4,7 @@
 
 A Claude Code mod that records what Claude looks at, what it decides, and where it works, in one panel next to the conversation.
 
-Open it with `/blackbox-mods`. The panel text is in Korean. The panel has six tabs:
+Open it with `/blackbox-mods`. Only this command opens the panel. Records keep accumulating while it is closed and show when you open it. The panel text is in Korean. The panel has six tabs:
 
 | Tab | What it shows |
 | --- | --- |
