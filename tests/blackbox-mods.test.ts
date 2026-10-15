@@ -1,14 +1,13 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import type { ActionEntry, Plan, PlanStep, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, activeStep, sameStep, hypothesesOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
+import type { ActionEntry, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
+import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
 
 function watch(on: any) {
-  const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
+  const seen: { runs: QueryRun[]; actions: ActionEntry[] } = { runs: [], actions: [] }
   on('state.set', async ($: unknown, e: any, next: any) => {
     if (e.key === 'runs') seen.runs = e.value
     if (e.key === 'actions') seen.actions = e.value
-    if (e.key === 'plans') seen.plans = e.value
     return next(e)
   })
   return seen
@@ -45,65 +44,6 @@ test('ignores Bash commands that run no query', async ($, on) => {
   expect(seen.runs).toEqual([])
 })
 
-test('keeps one entry per plan goal in a request, and a new entry in each later request', async () => {
-  const first: Plan = { id: 'a', t: 1, at: '10:00', turn: 1, goal: 'g', steps: [{ text: 's', label: '', status: 'todo', after: [] }] }
-  const other: Plan = { id: 'b', t: 2, at: '10:05', turn: 1, goal: 'h', steps: [] }
-  const same: Plan = { id: 'c', t: 3, at: '10:07', turn: 1, goal: 'g', steps: [{ text: 's', label: '', status: 'doing', after: [] }] }
-  const later: Plan = { id: 'd', t: 4, at: '10:09', turn: 2, goal: 'g', steps: [{ text: 's', label: '', status: 'done', after: [] }] }
-  const list = upsertPlan(upsertPlan(upsertPlan(upsertPlan([], first), other), same), later)
-  expect(list.map(plan => [plan.goal, plan.turn])).toEqual([['g', 1], ['h', 1], ['g', 2]])
-  expect(list[0]?.at).toBe('10:00')
-  expect(list[0]?.steps[0]?.status).toBe('doing')
-  expect(list[2]?.steps[0]?.status).toBe('done')
-})
-
-test('finds the step in progress of the latest plan in a request', async () => {
-  const step = (status: PlanStep['status']) => ({ text: 's', label: '', status, after: [] })
-  const list: Plan[] = [
-    { id: 'a', t: 1, at: '', turn: 1, goal: 'g', steps: [step('done'), step('doing')] },
-    { id: 'b', t: 2, at: '', turn: 2, goal: 'g', steps: [step('done'), step('done'), step('doing'), step('doing')] },
-    { id: 'c', t: 3, at: '', turn: 2, goal: 'h', steps: [step('todo')] },
-  ]
-  expect(activeStep(list, 1)).toEqual({ goal: 'g', n: 2 })
-  expect(activeStep(list, 2)).toEqual({ goal: 'g', n: 3 })
-  expect(activeStep(list, 3)).toBe(undefined)
-  expect(sameStep({ goal: 'g', n: 1 }, { goal: 'g', n: 1 })).toBe(true)
-  expect(sameStep({ goal: 'g', n: 1 }, undefined)).toBe(false)
-  expect(sameStep(undefined, undefined)).toBe(true)
-})
-
-test('keeps hypotheses with text and a known verdict', async () => {
-  expect(hypothesesOf([{ text: ' A ', verdict: 'rejected', evidence: 'e' }, { text: 'B', verdict: 'x' }, { text: '' }, null])).toEqual([
-    { text: 'A', verdict: 'rejected', evidence: 'e' },
-    { text: 'B', verdict: 'open', evidence: '' },
-  ])
-})
-
-test('writes a plan as text with its branches', async () => {
-  const plan: Plan = {
-    id: 'a',
-    t: 1,
-    at: '10:00',
-    turn: 1,
-    goal: 'g',
-    steps: [
-      { text: '조회', label: '', status: 'done', after: [] },
-      { text: '대조', label: '', status: 'doing', after: [1] },
-    ],
-  }
-  expect(planText(plan)).toBe('[x] 1. 조회\n[>] 2. 대조 ← 1')
-})
-
-test('stores a plan the model sends', async ($, on) => {
-  const seen = watch(on)
-  answerTools(on)
-  await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__show_plan', goal: 'g', steps: [{ text: 'a', status: 'doing' }, { text: 'b', status: 'todo' }] } as any)
-  expect(seen.plans[0]?.steps).toEqual([
-    { text: 'a', label: '', status: 'doing', after: [] },
-    { text: 'b', label: '', status: 'todo', after: [1] },
-  ])
-})
-
 test('finds cd targets and parses worktree lists', async () => {
   expect(cdTargetsOf('cd ~/Documents/Github/mi/dmp.crawler && git status; cd "a b" && ls')).toEqual([
     '~/Documents/Github/mi/dmp.crawler',
@@ -133,18 +73,17 @@ test('attaches the Blackbox rules to each prompt as context', async ($, on) => {
     expect(rules).toContain('track_decisions 도구로 항목마다 status pending')
     expect(rules).toContain('note_reads 도구로 목적')
     expect(rules).toContain('track_agreements 도구로 status assumed')
+    expect(rules).not.toContain('show_plan')
+    expect(rules).not.toContain('hypotheses')
   }
 })
 
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`draws the log tab and switches to the tree tab on ${surface}`, async ($, on) => {
     answerTools(on, '| a |\n|---|\n| 1 |')
-    await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__show_plan', goal: 'g', steps: [{ text: '계획 단계', status: 'todo' }] } as any)
     await ($.tool.call as any)({ tool: 'Bash', description: 'g', command: `python3 run_query.py -D web_mihd "SELECT a FROM t"` } as any)
     const log = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(log).toContain('계획 단계')
     expect(log).toContain('SELECT a FROM t')
-    expect(log.indexOf('계획 단계')).toBeLessThan(log.indexOf('SELECT a FROM t'))
     expect(log).toContain('▶ 세션 로그')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-tree', surface } as any)
     const treePane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
@@ -466,29 +405,7 @@ test('classifies skills by plugin name and folder', async () => {
   expect(classifySkill('plugin-authoring', '/private/tmp/bundled-skills/x/plugin-authoring')).toEqual({ group: 'builtin', plugin: '' })
 })
 
-test('draws a plan as an ascii flow and a separator line', async () => {
-  const steps = [
-    { text: '계획을 세운다', label: '계획', status: 'done' as const, after: [] },
-    { text: '코드를 고친다', label: '수정', status: 'doing' as const, after: [1] },
-    { text: '테스트를 고친다', label: '테스트', status: 'todo' as const, after: [1] },
-    { text: '사용자 승인', label: '승인', status: 'todo' as const, after: [2, 3] },
-  ]
-  expect(planDiagram(steps, 80)).toBe('[✓ 1. 계획]\n  ──> [▶ 2. 수정] + [  3. 테스트]\n  ──> [  4. 승인]')
-  expect(planDiagram(steps, 24)).toBe('[✓ 1. 계획]\n  ──> [▶ 2. 수정]\n      + [  3. 테스트]\n  ──> [  4. 승인]')
-  const judged = [
-    steps[0]!,
-    {
-      ...steps[1]!,
-      label: '원인 판단',
-      hypotheses: [
-        { text: '소스 API 지연', verdict: 'rejected' as const, evidence: 'API 응답 정상' },
-        { text: '배치 중단', verdict: 'adopted' as const, evidence: '' },
-      ],
-    },
-  ]
-  expect(planDiagram(judged, 80)).toBe(
-    '[✓ 1. 계획]\n  ──> [▶ 2. 원인 판단]\n        ├─ 2-A 가설: 소스 API 지연 → 기각 (API 응답 정상)\n        └─ 2-B 가설: 배치 중단 → 채택',
-  )
+test('draws a separator line and short summaries', async () => {
   expect(columnsOf('가a')).toBe(3)
   expect(separator('요청', 20)).toBe(`── 요청 ${'─'.repeat(12)}`)
   expect(shortSummary('짧은 요청')).toBe('짧은 요청')
@@ -831,7 +748,7 @@ const NOW = Date.parse('2026-10-14T00:00:00.000Z')
 const ago = (ms: number) => new Date(NOW - ms).toISOString()
 
 function emptyRecords(): SavedRecords {
-  return { turns: [], reads: [], runs: [], actions: [], plans: [], places: [], decisions: [], agreements: [], lastPrompt: '', tab: 'log', logPage: '' }
+  return { turns: [], reads: [], runs: [], actions: [], places: [], decisions: [], agreements: [], lastPrompt: '', tab: 'log', logPage: '' }
 }
 
 test('deletes other sessions last updated more than 30 days ago and keeps newer ones', async () => {
@@ -1016,42 +933,57 @@ test('saves at once when a turn completes, without waiting for the delay', async
   expect((store.get('session:s1') as SavedSession)?.records.agreements[0]?.id).toBe('a1')
 })
 
+test('registers no work plan tool at session start', async ($, on) => {
+  const names: string[] = []
+  on('tool.register', async (_$: unknown, e: any) => {
+    names.push(e.name)
+    return { value: undefined } as any
+  })
+  on('command.register', async () => ({ value: undefined }) as any)
+  on('session.start', async () => ({ cwd: '/tmp' }) as any)
+  memoryStore(on)
+  on('session.id', async () => ({ value: 's1' }) as any)
+  quietTools(on)
+  await ($.session as any).start({ cwd: '/tmp' })
+  expect(names).toContain('track_decisions')
+  expect(names).not.toContain('show_plan')
+})
+
+test('restores records saved with work plans and steps, and draws them without the plan', async ($, on) => {
+  const records = {
+    ...emptyRecords(),
+    turns: [{ n: 1, t: 1, at: '09:00', prompt: '어제 요청', summary: '어제 요청' }],
+    actions: [{ id: 'x', t: 2, at: '09:01', turn: 1, kind: 'command', target: 'ls old', note: '어제 명령', status: 'done', output: '', outputLines: 0, step: { goal: 'g', n: 1 } }],
+    plans: [{ id: 'p', t: 1, at: '09:00', turn: 1, goal: '어제 목표', steps: [{ text: '어제 단계', label: '어제 단계', status: 'doing', after: [] }] }],
+  }
+  startable(on)
+  memoryStore(on, { 'session:s1': { v: 1, updatedAt: new Date().toISOString(), records } })
+  on('session.id', async () => ({ value: 's1' }) as any)
+  quietTools(on)
+  await ($.session as any).start({ cwd: '/tmp' })
+  const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any))
+  expect(pane).toContain('어제 명령')
+  expect(pane).not.toContain('어제 목표')
+  expect(pane).not.toContain('작업 계획')
+})
+
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`groups a request's records under the steps of its work plan on ${surface}`, async ($, on) => {
+  test(`lists a request's records in time order without a work plan on ${surface}`, async ($, on) => {
     answerTools(on, 'ok')
     on('model.complete', async () => ({ value: { isAnswered: true, text: '실시간 순위 장애 대응', usage: {} } }) as any)
     on('prompt.submit', async (_$: unknown, e: any) => ({ text: e.text }) as any)
-    const plan = (s1: string, s2: string, hypotheses?: unknown) =>
-      ($.tool.call as any)({
-        tool: 'mcp__blackbox-mods__show_plan',
-        goal: '순위 미표시 원인 찾기',
-        steps: [
-          { text: '증상을 확인한다', label: '증상 확인', status: s1 },
-          { text: '원인을 판단한다', label: '원인 판단', status: s2, ...(hypotheses ? { hypotheses } : {}) },
-        ],
-      })
     await $.prompt.submit({ text: '실시간 순위가 안 보이는 장애가 있어. 원인을 찾아서 알려줘. 로그와 배치 코드를 봐줘.' } as any).catch(() => undefined)
-    await ($.tool.call as any)({ tool: 'Bash', description: '계획 전 명령', command: 'ls before' } as any)
-    await plan('doing', 'todo')
     await ($.tool.call as any)({ tool: 'Bash', description: '마지막 적재 시각 확인', command: 'ls load' } as any)
-    await plan('done', 'doing', [{ text: '배치 중단', verdict: 'adopted', evidence: 'OOM 로그' }])
     await ($.tool.call as any)({ tool: 'Bash', description: '배치 로그 확인', command: 'ls batch' } as any)
     await ($.tool.call as any)({ tool: 'Edit', file_path: '/tmp/fix.py', old_string: 'a', new_string: 'b' } as any)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     const at = (text: string) => pane.indexOf(text)
-    expect(at('◀ Prev')).toBeLessThan(at('## 실시간 순위 장애 대응'))
-    expect(at('## 실시간 순위 장애 대응')).toBeLessThan(at('▌ 작업 계획'))
-    expect(pane).toContain('[✓ 1. 증상 확인]\\n  ──> [▶ 2. 원인 판단]\\n        └─ 2-A 가설: 배치 중단 → 채택 (OOM 로그)')
-    expect(pane.match(/▌ 작업 계획/g)?.length).toBe(1)
-    expect(pane).not.toContain('▌ 계획')
-    expect(at('▌ 작업 계획')).toBeLessThan(at('▌ 1. 증상 확인'))
-    expect(at('▌ 1. 증상 확인')).toBeLessThan(at('마지막 적재 시각 확인'))
-    expect(at('마지막 적재 시각 확인')).toBeLessThan(at('▌ 2. 원인 판단'))
-    expect(at('▌ 2. 원인 판단')).toBeLessThan(at('▸ 명령'))
-    expect(at('▸ 명령')).toBeLessThan(at('배치 로그 확인'))
-    expect(pane).toContain('▸ 파일 수정')
-    expect(at('배치 로그 확인')).toBeLessThan(at('▌ 단계 밖'))
-    expect(at('▌ 단계 밖')).toBeLessThan(at('계획 전 명령'))
-    expect(pane).not.toContain('"▌ 명령"')
+    expect(at('## 실시간 순위 장애 대응')).toBeLessThan(at('마지막 적재 시각 확인'))
+    expect(at('마지막 적재 시각 확인')).toBeLessThan(at('배치 로그 확인'))
+    expect(at('배치 로그 확인')).toBeLessThan(at('▌ 파일 수정'))
+    expect(pane.match(/"▌ 명령"/g)?.length).toBe(2)
+    expect(pane).not.toContain('작업 계획')
+    expect(pane).not.toContain('단계 밖')
+    expect(pane).not.toContain('▸')
   })
 }
