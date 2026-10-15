@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import type { ActionEntry, Plan, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
+import type { ActionEntry, Plan, PlanStep, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
+import { actionOf, collectCommits, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, planDiagram, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, planText, purposeOf, activeStep, sameStep, hypothesesOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, upsertPlan, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; plans: Plan[]; actions: ActionEntry[] } = { runs: [], plans: [], actions: [] }
@@ -45,14 +45,38 @@ test('ignores Bash commands that run no query', async ($, on) => {
   expect(seen.runs).toEqual([])
 })
 
-test('keeps one entry per plan goal, updated in place', async () => {
+test('keeps one entry per plan goal in a request, and a new entry in each later request', async () => {
   const first: Plan = { id: 'a', t: 1, at: '10:00', turn: 1, goal: 'g', steps: [{ text: 's', label: '', status: 'todo', after: [] }] }
   const other: Plan = { id: 'b', t: 2, at: '10:05', turn: 1, goal: 'h', steps: [] }
-  const again: Plan = { id: 'c', t: 3, at: '10:09', turn: 2, goal: 'g', steps: [{ text: 's', label: '', status: 'done', after: [] }] }
-  const list = upsertPlan(upsertPlan(upsertPlan([], first), other), again)
-  expect(list.map(plan => plan.goal)).toEqual(['g', 'h'])
+  const same: Plan = { id: 'c', t: 3, at: '10:07', turn: 1, goal: 'g', steps: [{ text: 's', label: '', status: 'doing', after: [] }] }
+  const later: Plan = { id: 'd', t: 4, at: '10:09', turn: 2, goal: 'g', steps: [{ text: 's', label: '', status: 'done', after: [] }] }
+  const list = upsertPlan(upsertPlan(upsertPlan(upsertPlan([], first), other), same), later)
+  expect(list.map(plan => [plan.goal, plan.turn])).toEqual([['g', 1], ['h', 1], ['g', 2]])
   expect(list[0]?.at).toBe('10:00')
-  expect(list[0]?.steps[0]?.status).toBe('done')
+  expect(list[0]?.steps[0]?.status).toBe('doing')
+  expect(list[2]?.steps[0]?.status).toBe('done')
+})
+
+test('finds the step in progress of the latest plan in a request', async () => {
+  const step = (status: PlanStep['status']) => ({ text: 's', label: '', status, after: [] })
+  const list: Plan[] = [
+    { id: 'a', t: 1, at: '', turn: 1, goal: 'g', steps: [step('done'), step('doing')] },
+    { id: 'b', t: 2, at: '', turn: 2, goal: 'g', steps: [step('done'), step('done'), step('doing'), step('doing')] },
+    { id: 'c', t: 3, at: '', turn: 2, goal: 'h', steps: [step('todo')] },
+  ]
+  expect(activeStep(list, 1)).toEqual({ goal: 'g', n: 2 })
+  expect(activeStep(list, 2)).toEqual({ goal: 'g', n: 3 })
+  expect(activeStep(list, 3)).toBe(undefined)
+  expect(sameStep({ goal: 'g', n: 1 }, { goal: 'g', n: 1 })).toBe(true)
+  expect(sameStep({ goal: 'g', n: 1 }, undefined)).toBe(false)
+  expect(sameStep(undefined, undefined)).toBe(true)
+})
+
+test('keeps hypotheses with text and a known verdict', async () => {
+  expect(hypothesesOf([{ text: ' A ', verdict: 'rejected', evidence: 'e' }, { text: 'B', verdict: 'x' }, { text: '' }, null])).toEqual([
+    { text: 'A', verdict: 'rejected', evidence: 'e' },
+    { text: 'B', verdict: 'open', evidence: '' },
+  ])
 })
 
 test('writes a plan as text with its branches', async () => {
@@ -449,8 +473,22 @@ test('draws a plan as an ascii flow and a separator line', async () => {
     { text: '테스트를 고친다', label: '테스트', status: 'todo' as const, after: [1] },
     { text: '사용자 승인', label: '승인', status: 'todo' as const, after: [2, 3] },
   ]
-  expect(planDiagram(steps, 80)).toBe('[✓ 계획]\n  ──> [▶ 수정] + [  테스트]\n  ──> [  승인]')
-  expect(planDiagram(steps, 20)).toBe('[✓ 계획]\n  ──> [▶ 수정]\n      + [  테스트]\n  ──> [  승인]')
+  expect(planDiagram(steps, 80)).toBe('[✓ 1. 계획]\n  ──> [▶ 2. 수정] + [  3. 테스트]\n  ──> [  4. 승인]')
+  expect(planDiagram(steps, 24)).toBe('[✓ 1. 계획]\n  ──> [▶ 2. 수정]\n      + [  3. 테스트]\n  ──> [  4. 승인]')
+  const judged = [
+    steps[0]!,
+    {
+      ...steps[1]!,
+      label: '원인 판단',
+      hypotheses: [
+        { text: '소스 API 지연', verdict: 'rejected' as const, evidence: 'API 응답 정상' },
+        { text: '배치 중단', verdict: 'adopted' as const, evidence: '' },
+      ],
+    },
+  ]
+  expect(planDiagram(judged, 80)).toBe(
+    '[✓ 1. 계획]\n  ──> [▶ 2. 원인 판단]\n        ├─ 2-A 가설: 소스 API 지연 → 기각 (API 응답 정상)\n        └─ 2-B 가설: 배치 중단 → 채택',
+  )
   expect(columnsOf('가a')).toBe(3)
   expect(separator('요청', 20)).toBe(`── 요청 ${'─'.repeat(12)}`)
   expect(shortSummary('짧은 요청')).toBe('짧은 요청')
@@ -976,3 +1014,43 @@ test('saves at once when a turn completes, without waiting for the delay', async
   await ($.turn as any).complete({ answer: '끝', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer', agentId: 'sub' })
   expect((store.get('session:s1') as SavedSession)?.records.agreements[0]?.id).toBe('a1')
 })
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`groups a request's records under the steps of its work plan on ${surface}`, async ($, on) => {
+    answerTools(on, 'ok')
+    on('model.complete', async () => ({ value: { isAnswered: true, text: '실시간 순위 장애 대응', usage: {} } }) as any)
+    on('prompt.submit', async (_$: unknown, e: any) => ({ text: e.text }) as any)
+    const plan = (s1: string, s2: string, hypotheses?: unknown) =>
+      ($.tool.call as any)({
+        tool: 'mcp__blackbox-mods__show_plan',
+        goal: '순위 미표시 원인 찾기',
+        steps: [
+          { text: '증상을 확인한다', label: '증상 확인', status: s1 },
+          { text: '원인을 판단한다', label: '원인 판단', status: s2, ...(hypotheses ? { hypotheses } : {}) },
+        ],
+      })
+    await $.prompt.submit({ text: '실시간 순위가 안 보이는 장애가 있어. 원인을 찾아서 알려줘. 로그와 배치 코드를 봐줘.' } as any).catch(() => undefined)
+    await ($.tool.call as any)({ tool: 'Bash', description: '계획 전 명령', command: 'ls before' } as any)
+    await plan('doing', 'todo')
+    await ($.tool.call as any)({ tool: 'Bash', description: '마지막 적재 시각 확인', command: 'ls load' } as any)
+    await plan('done', 'doing', [{ text: '배치 중단', verdict: 'adopted', evidence: 'OOM 로그' }])
+    await ($.tool.call as any)({ tool: 'Bash', description: '배치 로그 확인', command: 'ls batch' } as any)
+    await ($.tool.call as any)({ tool: 'Edit', file_path: '/tmp/fix.py', old_string: 'a', new_string: 'b' } as any)
+    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    const at = (text: string) => pane.indexOf(text)
+    expect(at('◀ Prev')).toBeLessThan(at('## 실시간 순위 장애 대응'))
+    expect(at('## 실시간 순위 장애 대응')).toBeLessThan(at('▌ 작업 계획'))
+    expect(pane).toContain('[✓ 1. 증상 확인]\\n  ──> [▶ 2. 원인 판단]\\n        └─ 2-A 가설: 배치 중단 → 채택 (OOM 로그)')
+    expect(pane.match(/▌ 작업 계획/g)?.length).toBe(1)
+    expect(pane).not.toContain('▌ 계획')
+    expect(at('▌ 작업 계획')).toBeLessThan(at('▌ 1. 증상 확인'))
+    expect(at('▌ 1. 증상 확인')).toBeLessThan(at('마지막 적재 시각 확인'))
+    expect(at('마지막 적재 시각 확인')).toBeLessThan(at('▌ 2. 원인 판단'))
+    expect(at('▌ 2. 원인 판단')).toBeLessThan(at('▸ 명령'))
+    expect(at('▸ 명령')).toBeLessThan(at('배치 로그 확인'))
+    expect(pane).toContain('▸ 파일 수정')
+    expect(at('배치 로그 확인')).toBeLessThan(at('▌ 단계 밖'))
+    expect(at('▌ 단계 밖')).toBeLessThan(at('계획 전 명령'))
+    expect(pane).not.toContain('"▌ 명령"')
+  })
+}

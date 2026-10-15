@@ -8,6 +8,9 @@ export type Turn = {
   summary: string
 }
 
+/** 기록이 남을 때 진행 중(doing)이던 계획 단계. 같은 요청의 같은 목표 계획에서 1부터 센 단계 번호 */
+export type StepRef = { goal: string; n: number }
+
 export type QueryRun = {
   id: string
   /** 몇 번째 요청 중에 실행됐는지. 0 이면 요청 기록 전 */
@@ -23,6 +26,7 @@ export type QueryRun = {
   sql: string
   status: 'running' | 'done' | 'failed' | 'denied'
   output: string
+  step?: StepRef
 }
 
 /** 한 요청 안에서 Read 도구로 읽은 파일 묶음과 Claude 가 정리한 목적·결론 */
@@ -34,6 +38,7 @@ export type ReadEntry = {
   files: string[]
   purpose: string
   result: string
+  step?: StepRef
 }
 
 /** Claude 가 실행한 명령(DB 쿼리 제외) 또는 바꾼 파일 하나 */
@@ -52,7 +57,11 @@ export type ActionEntry = {
   output: string
   /** command: 출력 전체 줄 수 */
   outputLines: number
+  step?: StepRef
 }
+
+/** 판단 단계에서 세운 가설 하나와 그 판정 */
+export type Hypothesis = { text: string; verdict: 'adopted' | 'rejected' | 'open'; evidence: string }
 
 export type PlanStep = {
   text: string
@@ -61,6 +70,7 @@ export type PlanStep = {
   status: 'todo' | 'doing' | 'done' | 'skipped'
   /** 이 단계가 기다리는 앞 단계 번호(1부터). 빈 배열이면 시작 단계 */
   after: number[]
+  hypotheses?: Hypothesis[]
 }
 
 export type Plan = { id: string; t: number; at: string; turn: number; goal: string; steps: PlanStep[] }
