@@ -1108,3 +1108,19 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(pane).not.toContain('▸')
   })
 }
+
+test('opens the panel only when /blackbox-mods runs', async ($, on) => {
+  answerTools(on, 'ok')
+  const opened: string[] = []
+  on('ui.open', async (_$: unknown, e: any) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } } as any
+  })
+  await ($.tool.call as any)({ tool: 'Bash', description: '순위 확인', command: `python3 run_query.py -D web_mihd "SELECT 1"` } as any)
+  await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__track_decisions', items: [{ question: '저장할까', status: 'pending', decidedBy: 'user' }] })
+  expect(opened).toEqual([])
+  await ($.command.run as any)({ command: 'blackbox-mods', args: '' })
+  expect(opened).toEqual(['blackbox-mods'])
+  const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any))
+  expect(pane).toContain('결정 사항 (1)')
+})
