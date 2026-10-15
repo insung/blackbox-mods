@@ -99,7 +99,7 @@ export type IssueRef = {
   url: string
   /** 처음 나온 대화 위치(메시지 순번). 목록을 이 순서로 보인다 */
   order: number
-  /** 어디서 나왔는지: 사용자 프롬프트, Claude 답변, 명령 결과 */
+  /** 어디서 나왔는지: 사용자 프롬프트, Claude 답변, gh issue view 처럼 실행한 gh 명령, 명령 결과, 커밋 */
   sources: string[]
   /** gh 명령으로 한 일: view, create, comment, close … */
   actions: string[]
@@ -110,6 +110,8 @@ export type SessionCommit = {
   /** git commit 출력의 짧은 SHA */
   sha: string
   branch: string
+  /** 커밋한 폴더의 origin 이 가리키는 GitHub owner/repo. 모르면 '' 또는 없음(예전 기록) */
+  repo?: string
   subject: string
   /** 커밋 메시지에 적힌 이슈·PR 번호 (#N, Refs: #N) */
   refs: number[]

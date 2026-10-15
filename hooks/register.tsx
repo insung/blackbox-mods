@@ -403,7 +403,7 @@ export function collectIssues(
       const resultText = use.text ?? ''
       // 명령 결과는 gh 명령을 실행한 Bash 의 결과만 본다. 파일을 읽은 결과의 예시 URL 은 참조가 아니다
       if (use.tool !== 'Bash' || !/\bgh\s/.test(executedPart(command))) continue
-      for (const ref of refsInGhCommand(command, resultText)) add(ref, order, 'gh 명령')
+      for (const ref of refsInGhCommand(command, resultText)) add(ref, order, `gh ${ref.isPull ? 'pr' : 'issue'} ${ref.action ?? ''}`.trim())
       for (const ref of refsInText(resultText)) add(ref, order, '명령 결과')
     }
   })
@@ -474,21 +474,28 @@ export function dedupeCommits(list: SessionCommit[]): SessionCommit[] {
   )
 }
 
-/** LOOKUP_COMMIT 의 출력(짧은 SHA, 커밋을 담은 브랜치들, 메시지)을 읽는다. 브랜치를 이미 알면 그대로 쓰고, 아니면 main·master 밖의 브랜치를 고른다 */
-export function parseCommitLookup(output: string, knownBranch: string): { sha: string; branch: string; refs: number[] } | undefined {
-  const [sha = '', branchLine = '', ...body] = output.split('\n')
+/** git remote URL 에서 GitHub owner/repo 를 꺼낸다. GitHub 이 아니거나 비었으면 '' */
+export function repoOfRemote(url: string): string {
+  const m = url.trim().match(/github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/)
+  return m ? `${m[1]}/${m[2]}` : ''
+}
+
+/** LOOKUP_COMMIT 의 출력(origin URL, 짧은 SHA, 커밋을 담은 브랜치들, 메시지)을 읽는다. 브랜치를 이미 알면 그대로 쓰고, 아니면 main·master 밖의 브랜치를 고른다 */
+export function parseCommitLookup(output: string, knownBranch: string): { sha: string; branch: string; repo: string; refs: number[] } | undefined {
+  const [origin = '', sha = '', branchLine = '', ...body] = output.split('\n')
   if (!/^[0-9a-f]{7,40}$/.test(sha.trim())) return undefined
   const branches = branchLine.split(/\s+/).filter(Boolean)
   const branch = knownBranch || branches.find(name => !/^(main|master)$/.test(name)) || branches[0] || ''
-  return { sha: sha.trim(), branch, refs: refsOfMessage(body.join('\n')) }
+  return { sha: sha.trim(), branch, repo: repoOfRemote(origin), refs: refsOfMessage(body.join('\n')) }
 }
 
-/** $1 디렉토리에서 커밋을 찾는다. $2 SHA 가 없으면 $3 제목과 같은 최근 커밋을 쓴다 */
+/** $1 디렉토리에서 커밋을 찾는다. $2 SHA 가 없으면 $3 제목과 같은 최근 커밋을 쓴다. 첫 줄은 커밋한 저장소의 origin URL(없으면 빈 줄) */
 const LOOKUP_COMMIT = [
   'cd "$1" 2>/dev/null || exit 1',
   's="$2"',
   'if [ -z "$s" ]; then s=$(git log --all -n 200 --format=\'%h%x09%s\' | T="$3" awk -F\'\\t\' \'$2 == ENVIRON["T"] { print $1; exit }\'); fi',
   '[ -n "$s" ] || exit 1',
+  'echo "$(git remote get-url origin 2>/dev/null)"',
   'git rev-parse --short "$s" || exit 1',
   'git branch --contains "$s" --format=\'%(refname:short)\' | tr \'\\n\' \' \'; echo',
   'git show -s --format=%B "$s"',
@@ -531,7 +538,7 @@ export function groupByRepo(refs: readonly IssueRef[]): { repo: string; refs: Is
   return [...groups].map(([repo, list]) => ({ repo, refs: list }))
 }
 
-/** 커밋을 이슈·PR 에 잇는다: 메시지의 번호, 다음으로 PR head 브랜치. 잇지 못한 커밋은 unlinked */
+/** 커밋을 이슈·PR 에 잇는다: 같은 저장소에서 메시지의 번호, 다음으로 PR head 브랜치. 저장소를 모르거나 잇지 못한 커밋은 unlinked */
 export function linkCommits(
   list: SessionCommit[],
   refs: readonly IssueRef[],
@@ -540,8 +547,9 @@ export function linkCommits(
   const byKey: Record<string, SessionCommit[]> = {}
   const unlinked: SessionCommit[] = []
   for (const one of list) {
-    const byNumber = refs.find(ref => one.refs.includes(ref.number))
-    const byBranch = refs.find(ref => {
+    const sameRepo = refs.filter(ref => Boolean(one.repo) && `${ref.owner}/${ref.repo}` === one.repo)
+    const byNumber = sameRepo.find(ref => one.refs.includes(ref.number))
+    const byBranch = sameRepo.find(ref => {
       const meta = metas[ref.key]
       return meta !== undefined && !('error' in meta) && meta.isPull && meta.branch === one.branch
     })
@@ -550,6 +558,80 @@ export function linkCommits(
     else unlinked.push(one)
   }
   return { byKey, unlinked }
+}
+
+/** 이 세션 커밋이 가리키지만 대화에 나오지 않은 이슈·PR 을 만든다. 저장소를 아는 커밋만 쓴다 */
+export function refsFromCommits(list: readonly SessionCommit[], known: readonly IssueRef[]): IssueRef[] {
+  const added: IssueRef[] = []
+  for (const one of list) {
+    const [owner = '', repo = ''] = (one.repo ?? '').split('/')
+    if (!owner || !repo) continue
+    for (const number of one.refs) {
+      const key = `${owner}/${repo}#${number}`
+      if ([...known, ...added].some(ref => ref.key === key)) continue
+      added.push({ key, owner, repo, number, isPull: false, url: `https://github.com/${owner}/${repo}/issues/${number}`, order: one.order, sources: ['커밋'], actions: [] })
+    }
+  }
+  return added
+}
+
+/** gh 동작 중 읽기만 하는 것. 이 밖의 동작(create, comment, close, merge …)은 이슈·PR 을 처리한 것으로 본다 */
+const READ_ACTIONS = new Set(['view', 'list', 'status', 'diff', 'checks'])
+
+const ACTION_LABEL: Record<string, string> = {
+  create: '생성',
+  comment: '코멘트',
+  edit: '수정',
+  close: '닫기',
+  reopen: '다시 열기',
+  merge: '머지',
+  review: '리뷰',
+  ready: '준비 완료',
+  delete: '삭제',
+  lock: '잠금',
+  unlock: '잠금 해제',
+  pin: '고정',
+  unpin: '고정 해제',
+  transfer: '이전',
+  develop: '브랜치 연결',
+  checkout: '체크아웃',
+}
+
+/** 이 세션에서 이슈·PR 에 한 쓰기 동작의 이름들. 커밋만 이어졌으면 「커밋」 */
+export function handledActions(ref: IssueRef, commitCount: number): string[] {
+  const done = ref.actions.filter(action => !READ_ACTIONS.has(action)).map(action => ACTION_LABEL[action] ?? action)
+  return done.length === 0 && commitCount > 0 ? ['커밋'] : done
+}
+
+/** 이 세션에서 처리한 것(쓰기 동작이나 커밋이 닿은 것)과 언급만 한 것(참고)으로 나눈다 */
+export function splitHandled(
+  refs: readonly IssueRef[],
+  byKey: Record<string, SessionCommit[]>,
+): { handled: IssueRef[]; consulted: IssueRef[] } {
+  const handled: IssueRef[] = []
+  const consulted: IssueRef[] = []
+  for (const ref of refs) {
+    const isHandled = handledActions(ref, byKey[ref.key]?.length ?? 0).length > 0 || ref.sources.includes('커밋')
+    ;(isHandled ? handled : consulted).push(ref)
+  }
+  return { handled, consulted }
+}
+
+/** 처리한 이슈·PR 과 이슈 없는 커밋을 저장소별로 묶는다. 저장소는 처음 나온 순서, 저장소를 모르는 커밋은 맨 뒤 '' 묶음 */
+export function groupHandled(
+  refs: readonly IssueRef[],
+  unlinked: readonly SessionCommit[],
+): { repo: string; refs: IssueRef[]; commits: SessionCommit[] }[] {
+  const groups = new Map<string, { repo: string; refs: IssueRef[]; commits: SessionCommit[]; order: number }>()
+  const groupOf = (repo: string, order: number) => {
+    const group = groups.get(repo) ?? { repo, refs: [], commits: [], order: repo ? order : Number.POSITIVE_INFINITY }
+    if (repo) group.order = Math.min(group.order, order)
+    groups.set(repo, group)
+    return group
+  }
+  for (const ref of refs) groupOf(`${ref.owner}/${ref.repo}`, ref.order).refs.push(ref)
+  for (const one of unlinked) groupOf(one.repo ?? '', one.order).commits.push(one)
+  return [...groups.values()].sort((a, b) => a.order - b.order).map(({ repo, refs, commits }) => ({ repo, refs, commits }))
 }
 
 type TranscriptMessage = {
@@ -904,7 +986,9 @@ async function refreshIssues($: EngineInterface): Promise<void> {
   await update($, issuesAt, () => timeNow())
   const found = await resolveCommits($, collectCommits(Array.isArray(messages) ? messages : [])).catch(() => undefined)
   if (found) await update($, commits, () => found)
-  for (const ref of list) {
+  const all = [...list, ...refsFromCommits(found ?? [], list)].sort((a, b) => a.order - b.order)
+  if (all.length > list.length) await update($, issues, () => all)
+  for (const ref of all) {
     const meta = await fetchMeta($, ref).catch(() => ({ error: '읽지 못함' }) as IssueMeta)
     await update($, issueMeta, all => ({ ...all, [ref.key]: meta }))
   }
@@ -1792,6 +1876,8 @@ export const register: Register = (on, options) => {
     })
     const issueAt = await read($, issuesAt)
     const linked = linkCommits(await read($, commits), visibleIssues, metas)
+    const { handled, consulted } = splitHandled(visibleIssues, linked.byKey)
+    const handledGroups = groupHandled(handled, linked.unlinked)
     const commitRows = (list: SessionCommit[], lead: string) =>
       list.map((one, n) => (
         <Box flexDirection="row">
@@ -2058,18 +2144,19 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column">
               <Box flexDirection="row">
                 <Button key="refresh-issues" onPress={() => refreshIssues($)}>새로고침</Button>
-                <Text dimColor>{issueAt ? `  ${issueAt} 기준 · ${visibleIssues.length}건` : '  아직 읽지 않았다'}</Text>
+                <Text dimColor>{issueAt ? `  ${issueAt} 기준 · 처리 ${handled.length}건 · 참고 ${consulted.length}건` : '  아직 읽지 않았다'}</Text>
               </Box>
-              {issueAt && visibleIssues.length === 0 && linked.unlinked.length === 0 && <Text dimColor>이 세션에서 다룬 GitHub 이슈·PR 과 커밋이 없다.</Text>}
-              {groupByRepo(visibleIssues).map(group => (
+              {issueAt && handled.length === 0 && linked.unlinked.length === 0 && <Text dimColor>이 세션에서 처리한 GitHub 이슈·PR 과 커밋이 없다.</Text>}
+              {handledGroups.map(group => (
                 <Box flexDirection="column" marginTop={1}>
-                  <Text bold color="claude">{`▸ ${group.repo}  ${group.refs.length}건`}</Text>
+                  <Text bold color="claude">{group.repo ? `▸ ${group.repo}  ${group.refs.length}건` : '▸ 저장소 모름'}</Text>
                   {group.refs.map(ref => {
                     const meta = metas[ref.key]
                     const hasMeta = meta !== undefined && !('error' in meta)
                     const isPull = hasMeta ? meta.isPull : ref.isPull
                     const url = ref.url.replace(/\/(issues|pull)\//, isPull ? '/pull/' : '/issues/')
                     const badge = stateBadge(meta, ref.isPull)
+                    const done = handledActions(ref, linked.byKey[ref.key]?.length ?? 0)
                     return (
                       <Box flexDirection="column">
                         <Box flexDirection="row">
@@ -2079,8 +2166,9 @@ export const register: Register = (on, options) => {
                           {hasMeta && meta.isPull && <Text dimColor>{`${meta.branch}  `}</Text>}
                           {hasMeta && meta.isPull && <Text color="success">{`+${meta.additions.toLocaleString('en-US')} `}</Text>}
                           {hasMeta && meta.isPull && <Text color="error">{`−${meta.deletions.toLocaleString('en-US')}  `}</Text>}
-                          {hasMeta && meta.isPull && <Text color={CI_BADGE[meta.ci].color}>{CI_BADGE[meta.ci].text}</Text>}
-                          {hasMeta && !meta.isPull && <Text dimColor>{cut(meta.title, 60)}</Text>}
+                          {hasMeta && meta.isPull && <Text color={CI_BADGE[meta.ci].color}>{`${CI_BADGE[meta.ci].text}  `}</Text>}
+                          {hasMeta && !meta.isPull && <Text dimColor>{`${cut(meta.title, 60)}  `}</Text>}
+                          {done.length > 0 && <Text color="suggestion">{done.join(' · ')}</Text>}
                         </Box>
                         {hasMeta && meta.isPull && <Text dimColor>{`        ${cut(meta.title, 80)}`}</Text>}
                         {!hasMeta && <Text dimColor>{`        ${meta && 'error' in meta ? `읽지 못함: ${meta.error}` : '읽는 중…'}`}</Text>}
@@ -2088,12 +2176,37 @@ export const register: Register = (on, options) => {
                       </Box>
                     )
                   })}
+                  {group.commits.length > 0 && (
+                    <Box flexDirection="column">
+                      <Text bold>{`  이슈 없는 커밋  ${group.commits.length}건`}</Text>
+                      {commitRows(group.commits, '        ')}
+                    </Box>
+                  )}
                 </Box>
               ))}
-              {linked.unlinked.length > 0 && (
+              {consulted.length > 0 && (
                 <Box flexDirection="column" marginTop={1}>
-                  <Text bold>{`이슈 없는 커밋  ${linked.unlinked.length}건`}</Text>
-                  {commitRows(linked.unlinked, '  ')}
+                  <Text bold dimColor>{`참고한 이슈·PR  ${consulted.length}건`}</Text>
+                  {groupByRepo(consulted).map(group => (
+                    <Box flexDirection="column">
+                      <Text dimColor>{`  ▸ ${group.repo}`}</Text>
+                      {group.refs.map(ref => {
+                        const meta = metas[ref.key]
+                        const hasMeta = meta !== undefined && !('error' in meta)
+                        const isPull = hasMeta ? meta.isPull : ref.isPull
+                        const url = ref.url.replace(/\/(issues|pull)\//, isPull ? '/pull/' : '/issues/')
+                        const badge = stateBadge(meta, ref.isPull)
+                        return (
+                          <Box flexDirection="row">
+                            <Text color={badge.color}>{`    ${badge.text}  `}</Text>
+                            <Link href={url} label={`#${ref.number}`} />
+                            <Text dimColor>{`  ${hasMeta ? cut(meta.title, 60) : '읽는 중…'}  `}</Text>
+                            <Text dimColor>{ref.sources.join(' · ')}</Text>
+                          </Box>
+                        )
+                      })}
+                    </Box>
+                  ))}
                 </Box>
               )}
             </Box>
