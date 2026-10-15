@@ -1735,7 +1735,7 @@ export const register: Register = (on, options) => {
     const width = Math.max(30, Math.min(100, (e.props?.bodyColumns ?? 80) - 2))
     const turnList = await read($, turns)
     const turnOf = (n: number) => turnList.find(one => one.n === n)
-    /** 요청 묶음 머리: 요청 시각 구분선과 그 아래 요청 요약 제목 */
+    /** 요청 묶음 머리: 색 있는 요청 시각과 그 아래 요청 요약 제목 */
     const headOf = (n: number, at: string) => {
       const turn = turnOf(n)
       return { at: turn?.at ?? at, heading: turn?.summary ?? '(요청 기록 없음)' }
@@ -1805,7 +1805,7 @@ export const register: Register = (on, options) => {
     const cut = (text: string, size: number) => (text.length > size ? `${text.slice(0, size)}…` : text)
     const groupHead = (at: string, heading: string) => (
       <Box flexDirection="column">
-        <Text bold color="claude">{separator(`[${at}]`, width)}</Text>
+        <Text bold color="claude">{`[${at}]`}</Text>
         <Markdown text={`## ${mdInline(heading)}`} />
       </Box>
     )
