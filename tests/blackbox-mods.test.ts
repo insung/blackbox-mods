@@ -395,12 +395,17 @@ for (const surface of ['terminal', 'desktop'] as const) {
             { tool: 'Bash', input: { command: 'gh issue create --repo o/r --title t' }, text: 'https://github.com/o/r/issues/29' },
             { tool: 'Bash', input: { command: 'gh pr view 27 --repo p/q' }, text: '' },
             { tool: 'Bash', input: { command: "git commit -m 'chore: 정리'" }, text: '[main 9a8b7c6] chore: 정리' },
+            { tool: 'Bash', input: { command: "git commit -m 'docs: 문서'" }, text: '[main 1b1b1b1] docs: 문서' },
           ],
         },
       ],
     }) as any)
     on('process.run', async (_$: unknown, e: any) => {
-      if (String(e.argv[2] ?? '').includes('rev-parse')) return { value: { exitCode: 0, stdout: `\n${e.argv[5]}\nmain \n${e.argv[6]}\n`, stderr: '' } } as any
+      if (String(e.argv[2] ?? '').includes('rev-parse')) {
+        // 1b1b1b1 커밋을 한 폴더만 origin 이 있다
+        const origin = e.argv[5] === '1b1b1b1' ? 'https://github.com/w/z.git' : ''
+        return { value: { exitCode: 0, stdout: `${origin}\n${e.argv[5]}\nmain \n${e.argv[6]}\n`, stderr: '' } } as any
+      }
       const [owner, repo, number] = e.argv.slice(-3)
       return { value: { exitCode: 0, stdout: `issue\n{"title":"제목 ${owner}/${repo}#${number}","state":"OPEN","stateReason":""}`, stderr: '' } } as any
     })
@@ -413,6 +418,11 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(pane).toContain('▸ o/r  1건')
     expect(pane).toContain('생성')
     expect(pane).toContain('▸ 저장소 모름')
+    // 커밋만 있는 저장소는 머리줄에 건수를 붙이지 않는다
+    expect(pane).toContain('"▸ w/z"')
+    expect(pane).not.toContain('▸ w/z  0건')
+    expect(at('▸ w/z')).toBeLessThan(at('1b1b1b1'))
+    expect(at('1b1b1b1')).toBeLessThan(at('▸ 저장소 모름'))
     expect(at('제목 o/r#29')).toBeLessThan(at('▸ 저장소 모름'))
     expect(at('▸ 저장소 모름')).toBeLessThan(at('9a8b7c6'))
     expect(at('9a8b7c6')).toBeLessThan(at('참고한 이슈·PR  2건'))

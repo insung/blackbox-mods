@@ -2149,7 +2149,7 @@ export const register: Register = (on, options) => {
               {issueAt && handled.length === 0 && linked.unlinked.length === 0 && <Text dimColor>이 세션에서 처리한 GitHub 이슈·PR 과 커밋이 없다.</Text>}
               {handledGroups.map(group => (
                 <Box flexDirection="column" marginTop={1}>
-                  <Text bold color="claude">{group.repo ? `▸ ${group.repo}  ${group.refs.length}건` : '▸ 저장소 모름'}</Text>
+                  <Text bold color="claude">{!group.repo ? '▸ 저장소 모름' : group.refs.length > 0 ? `▸ ${group.repo}  ${group.refs.length}건` : `▸ ${group.repo}`}</Text>
                   {group.refs.map(ref => {
                     const meta = metas[ref.key]
                     const hasMeta = meta !== undefined && !('error' in meta)
