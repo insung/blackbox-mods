@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { ActionEntry, Agreement, Decision, Hypothesis, StepRef, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, Plan, PlanStep, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn, Worktree } from '../types'
+import type { ActionEntry, Agreement, Decision, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn, Worktree } from '../types'
 
 const LOG_PANE = 'blackbox-mods'
 const TABS: { id: TabId; label: string }[] = [
@@ -14,13 +14,12 @@ const TABS: { id: TabId; label: string }[] = [
 ]
 const READ_TOOL = 'note_reads'
 const SUMMARY_LIMIT = 30
-const PLAN_TOOL = 'show_plan'
 const DECISION_TOOL = 'track_decisions'
 const AGREEMENT_TOOL = 'track_agreements'
 const QUERY_COMMAND = /run_query\.py|(^|[\s;&|])mysql\s/
 const OUTPUT_LINES = 30
 /** 세션 로그 항목 머리의 색: 종류마다 다르게 해 항목끼리 구분한다 */
-const KIND_COLOR = { plan: 'planMode', read: 'suggestion', file: 'success', command: 'bashBorder', query: 'permission' } as const
+const KIND_COLOR = { read: 'suggestion', file: 'success', command: 'bashBorder', query: 'permission' } as const
 const AGREEMENT_KINDS = ['premise', 'scope', 'term', 'method', 'reading', 'format'] as const
 const AGREEMENT_KIND_LABEL: Record<Agreement['kind'], string> = {
   premise: '진행 전제',
@@ -34,7 +33,6 @@ const AGREEMENT_MARK: Record<Agreement['status'], string> = { assumed: '[?]', co
 /** 암묵적 합의 탭 맨 위의 설명 */
 const AGREEMENT_HELP =
   '암묵적 합의: 아무도 묻지 않았지만 Claude 가 작업의 전제로 삼은 것(진행 전제, 범위, 용어, 작업 방식, 요청 해석, 답 형식)이다. 묻고 답한 것은 결정 사항 탭에 있다. 틀린 전제는 [아님] 으로 바로잡는다.'
-const STEP_MARK: Record<PlanStep['status'], string> = { todo: '[ ]', doing: '[>]', done: '[x]', skipped: '[-]' }
 const DECISION_RULE = [
   '사용자에게 결정을 맡기는 항목(진행 여부, 방법 선택, 이름, 범위 등)을 답변에 남길 때는 답변을 끝내기 전에 track_decisions 도구로 항목마다 status pending, decidedBy user 로 등록한다. 질문, 선택지, 권장안을 함께 보낸다.',
   '요청을 분석해 Claude 가 스스로 정했고 사용자에게 묻지 않아도 되는 항목은 status decided, decidedBy claude 로 등록한다.',
@@ -52,9 +50,6 @@ const AGREEMENT_RULE = [
 
 const READ_RULE = [
   'Read 도구로 파일을 읽어 결론을 냈으면, 그 요청의 답을 끝내기 전에 note_reads 도구로 목적(왜 읽었는지)과 결과(읽고 내린 결론)를 각각 한두 줄로 보낸다. 읽은 파일 경로는 도구가 자동으로 모은다.',
-  'show_plan 의 단계에는 다이어그램에 쓸 10자 안팎의 label 을 함께 보낸다.',
-  '여러 단계 작업은 다음 단계의 도구를 쓰기 전에 show_plan 으로 끝난 단계를 done, 시작할 단계를 doing 으로 바꿔 보낸다. 패널은 파일 읽기·명령·쿼리 기록을 그때 doing 인 단계에 묶는다. 단계를 넘기기 전에 그 단계에서 읽은 파일의 note_reads 를 보낸다.',
-  '판단 단계에서는 그 단계의 hypotheses 로 가설마다 text(내용), verdict(adopted 채택·rejected 기각·open 검토 중), evidence(근거 한 줄)를 보낸다.',
 ].join('\n')
 
 const PURPOSE_RULE = [
@@ -73,7 +68,6 @@ const turns = atom({ plugin: 'blackbox-mods', key: 'turns' } as const, [] as Tur
 const reads = atom({ plugin: 'blackbox-mods', key: 'reads' } as const, [] as ReadEntry[])
 const runs = atom({ plugin: 'blackbox-mods', key: 'runs' } as const, [] as QueryRun[])
 const actions = atom({ plugin: 'blackbox-mods', key: 'actions' } as const, [] as ActionEntry[])
-const plans = atom({ plugin: 'blackbox-mods', key: 'plans' } as const, [] as Plan[])
 const places = atom({ plugin: 'blackbox-mods', key: 'places' } as const, [] as string[])
 const tree = atom({ plugin: 'blackbox-mods', key: 'tree' } as const, null as TreeView | null)
 const issues = atom({ plugin: 'blackbox-mods', key: 'issues' } as const, [] as IssueRef[])
@@ -103,7 +97,7 @@ const SAVE_DELAY_MS = 1000
 /** 저장할 때 큰 값을 자른 자리에 붙이는 표시 */
 const CUT_MARK = '\n… (저장 한도를 넘어 잘림)'
 /** 저장 대상 atom 의 key. 이 atom 이 바뀌면 저장을 예약한다 */
-const SAVED_KEYS = new Set(['turns', 'reads', 'runs', 'actions', 'plans', 'places', 'decisions', 'agreements', 'lastPrompt', 'tab', 'logPage'])
+const SAVED_KEYS = new Set(['turns', 'reads', 'runs', 'actions', 'places', 'decisions', 'agreements', 'lastPrompt', 'tab', 'logPage'])
 
 export function sessionKey(id: string): string {
   return `${SESSION_PREFIX}${id}`
@@ -166,7 +160,7 @@ function cutText(text: string, size: number): string {
 /**
  * 기록이 budget 바이트를 넘으면 줄인다. 패널의 기록(메모리)은 그대로 두고 저장할 사본만 줄인다.
  * 1) 쿼리·명령 결과처럼 큰 글을 차례로 더 짧게 자른다
- * 2) 그래도 넘으면 세션 로그 목록(쿼리, 명령·파일, 읽은 파일, 계획, 요청)의 오래된 절반씩을 뺀다. 결정 사항과 암묵적 합의는 남긴다
+ * 2) 그래도 넘으면 세션 로그 목록(쿼리, 명령·파일, 읽은 파일, 요청)의 오래된 절반씩을 뺀다. 결정 사항과 암묵적 합의는 남긴다
  */
 export function shrinkRecords(records: SavedRecords, budget: number): SavedRecords {
   if (jsonBytes(records) <= budget) return records
@@ -184,9 +178,9 @@ export function shrinkRecords(records: SavedRecords, budget: number): SavedRecor
   }
   const newerHalf = <T,>(list: T[]) => list.slice(Math.ceil(list.length / 2))
   while (jsonBytes(next) > budget) {
-    const logs = [next.runs, next.actions, next.reads, next.plans]
+    const logs = [next.runs, next.actions, next.reads]
     if (logs.some(list => list.length > 0)) {
-      next = { ...next, runs: newerHalf(next.runs), actions: newerHalf(next.actions), reads: newerHalf(next.reads), plans: newerHalf(next.plans) }
+      next = { ...next, runs: newerHalf(next.runs), actions: newerHalf(next.actions), reads: newerHalf(next.reads) }
     } else if (next.turns.length > 0) {
       next = { ...next, turns: newerHalf(next.turns) }
     } else {
@@ -244,7 +238,6 @@ async function savedRecords($: EngineInterface): Promise<SavedRecords> {
     reads: await read($, reads),
     runs: await read($, runs),
     actions: await read($, actions),
-    plans: await read($, plans),
     places: await read($, places),
     decisions: await read($, decisions),
     agreements: await read($, agreements),
@@ -300,7 +293,7 @@ async function restoreSession($: EngineInterface): Promise<void> {
   const saved = savedRecordsOf(stored)
   // 핫 리로드처럼 메모리에 이미 기록이 있으면 덮어쓰지 않는다
   const memory = await savedRecords($)
-  const isEmpty = [memory.turns, memory.reads, memory.runs, memory.actions, memory.plans, memory.places, memory.decisions, memory.agreements].every(list => list.length === 0)
+  const isEmpty = [memory.turns, memory.reads, memory.runs, memory.actions, memory.places, memory.decisions, memory.agreements].every(list => list.length === 0)
   if (saved && isEmpty) {
     isRestoring = true
     try {
@@ -310,7 +303,6 @@ async function restoreSession($: EngineInterface): Promise<void> {
       await update($, reads, () => listOf<ReadEntry>(saved.reads))
       await update($, runs, () => listOf<QueryRun>(saved.runs))
       await update($, actions, () => listOf<ActionEntry>(saved.actions))
-      await update($, plans, () => listOf<Plan>(saved.plans))
       await update($, places, () => listOf<string>(saved.places))
       await update($, decisions, () => listOf<Decision>(saved.decisions))
       await update($, agreements, () => listOf<Agreement>(saved.agreements))
@@ -977,76 +969,6 @@ export function separator(title: string, width: number): string {
   return head + '─'.repeat(Math.max(2, width - columnsOf(head)))
 }
 
-const BOX_MARK: Record<PlanStep['status'], string> = { todo: ' ', doing: '▶', done: '✓', skipped: '✗' }
-const VERDICT_LABEL: Record<Hypothesis['verdict'], string> = { adopted: '채택', rejected: '기각', open: '검토 중' }
-
-export function hypothesesOf(input: unknown[]): Hypothesis[] {
-  return input
-    .map(one => one as { text?: unknown; verdict?: unknown; evidence?: unknown })
-    .map(one => ({
-      text: String(one?.text ?? '').trim(),
-      verdict: (['adopted', 'rejected', 'open'] as const).find(v => v === one?.verdict) ?? 'open',
-      evidence: String(one?.evidence ?? '').trim(),
-    }))
-    .filter(one => one.text)
-}
-
-export function levelsOf(steps: PlanStep[]): number[] {
-  const levels: number[] = []
-  steps.forEach((step, index) => {
-    const parents = (step.after ?? []).filter(n => n >= 1 && n <= index).map(n => levels[n - 1] ?? 0)
-    levels[index] = parents.length > 0 ? Math.max(...parents) + 1 : 0
-  })
-  return levels
-}
-
-export function stepLabel(step: PlanStep): string {
-  return step.label || (step.text.length > 12 ? `${step.text.slice(0, 12)}…` : step.text)
-}
-
-/**
- * 단계마다 한 줄인 흐름 그림. 상자에는 상태, 단계 번호, 라벨을 쓴다. 같은 단계에서 나란히 하는 일은 + 로 한 줄에 잇고,
- * 폭을 넘으면 + 앞에서 줄을 바꾼다. 가설이 있는 단계는 그 줄 아래에 가설과 판정을 단다
- *
- * [✓ 1. 계획]
- *   ──> [▶ 2. 수정] + [ 3. 검토]
- *         ├─ 3-A 가설: … → 기각 (근거)
- *         └─ 3-B 가설: … → 채택 (근거)
- *   ──> [ 4. 승인]
- */
-export function planDiagram(steps: PlanStep[], width: number): string {
-  const levels = levelsOf(steps)
-  const groups: number[][] = []
-  steps.forEach((_step, index) => {
-    ;(groups[levels[index] ?? 0] ??= []).push(index)
-  })
-  const lines: string[] = []
-  groups.forEach((group, index) => {
-    let line = index === 0 ? '' : '  ──> '
-    group.forEach((at, n) => {
-      const step = steps[at]
-      if (!step) return
-      const box = `[${BOX_MARK[step.status]} ${at + 1}. ${stepLabel(step)}]`
-      if (n > 0 && columnsOf(`${line} + ${box}`) > width) {
-        lines.push(line)
-        line = `      + ${box}`
-      } else {
-        line += n === 0 ? box : ` + ${box}`
-      }
-    })
-    lines.push(line)
-    for (const at of group) {
-      const hypotheses = steps[at]?.hypotheses ?? []
-      hypotheses.forEach((one, n) => {
-        const branch = n === hypotheses.length - 1 ? '└─' : '├─'
-        const id = `${at + 1}-${String.fromCharCode(65 + (n % 26))}`
-        lines.push(`        ${branch} ${id} 가설: ${one.text} → ${VERDICT_LABEL[one.verdict]}${one.evidence ? ` (${one.evidence})` : ''}`)
-      })
-    }
-  })
-  return lines.join('\n')
-}
-
 /** 보는 묶음의 위치. 고른 묶음이 없거나 사라졌으면 마지막 묶음이다 */
 export function pageIndex(keys: string[], selected: string): number {
   const at = selected ? keys.indexOf(selected) : -1
@@ -1059,60 +981,16 @@ export function movePage(keys: string[], selected: string, step: number): string
   return at < 0 || at === keys.length - 1 ? '' : (keys[at] ?? '')
 }
 
-/** 이 요청에서 마지막으로 갱신된 계획의 진행 중(doing) 단계. 나란히 진행 중이면 앞 단계. 없으면 undefined */
-export function activeStep(list: Plan[], turn: number): StepRef | undefined {
-  for (const plan of [...list].reverse()) {
-    if (plan.turn !== turn) continue
-    const index = plan.steps.findIndex(step => step.status === 'doing')
-    if (index >= 0) return { goal: plan.goal, n: index + 1 }
-  }
-  return undefined
-}
-
-export function sameStep(x: StepRef | undefined, y: StepRef | undefined): boolean {
-  return x?.goal === y?.goal && x?.n === y?.n
-}
-
-/** 기록이 이 계획의 단계 중 하나에 속하는지 */
-export function sameStepIn(plan: Plan, step: StepRef | undefined): boolean {
-  return step !== undefined && step.goal === plan.goal && step.n >= 1 && step.n <= plan.steps.length
-}
-
-function stepOfItem(item: { kind: string; run?: QueryRun; entry?: ReadEntry; action?: ActionEntry }): StepRef | undefined {
-  return item.run?.step ?? item.entry?.step ?? item.action?.step
-}
-
-async function stepNow($: EngineInterface, turn: number): Promise<StepRef | undefined> {
-  return activeStep(await read($, plans), turn)
-}
-
 async function recordRead($: EngineInterface, file: string): Promise<void> {
   const turn = await currentTurn($)
-  const step = await stepNow($, turn)
   await update($, reads, list => {
     const last = list.at(-1)
-    if (last && last.turn === turn && sameStep(last.step, step)) {
+    if (last && last.turn === turn) {
       return last.files.includes(file) ? list : [...list.slice(0, -1), { ...last, files: [...last.files, file] }]
     }
-    const entry: ReadEntry = { id: `r${Date.now()}`, t: Date.now(), at: timeNow(), turn, files: [file], purpose: '', result: '', ...(step ? { step } : {}) }
+    const entry: ReadEntry = { id: `r${Date.now()}`, t: Date.now(), at: timeNow(), turn, files: [file], purpose: '', result: '' }
     return [...list, entry].slice(-100)
   })
-}
-
-export function planText(plan: Plan): string {
-  return plan.steps
-    .map((step, index) => {
-      const from = (step.after ?? []).length > 0 ? ` ← ${(step.after ?? []).join(', ')}` : ''
-      return `${STEP_MARK[step.status]} ${index + 1}. ${step.text}${from}`
-    })
-    .join('\n')
-}
-
-/** 같은 요청의 같은 목표 계획은 처음 기록한 자리에서 마지막 상태로 덮어쓴다. 요청이나 목표가 다르면 새로 넣어, 요청마다 그 요청 끝의 상태가 남는다 */
-export function upsertPlan(list: Plan[], plan: Plan): Plan[] {
-  const same = list.findIndex(one => one.goal === plan.goal && one.turn === plan.turn)
-  if (same < 0) return [...list, plan].slice(-50)
-  return list.map((one, index) => (index === same ? { ...plan, id: one.id, t: one.t, at: one.at, turn: one.turn } : one))
 }
 
 /** `cd <dir>` 들이 가리키는 디렉토리. 따옴표 하나와 `~` 만 다룬다 */
@@ -1361,8 +1239,7 @@ async function recordAction($: EngineInterface, e: { tool: string } & Record<str
   const action = actionOf(e, ran)
   if (!action) return
   const turn = await currentTurn($)
-  const step = await stepNow($, turn)
-  const entry: ActionEntry = { ...action, t: Date.now(), at: timeNow(), turn, ...(step ? { step } : {}) }
+  const entry: ActionEntry = { ...action, t: Date.now(), at: timeNow(), turn }
   await update($, actions, list => [...list, entry].slice(-200))
 }
 
@@ -1376,9 +1253,7 @@ async function record($: EngineInterface, e: { command: string; description?: st
     )
   }
   const turn = await currentTurn($)
-  const step = await stepNow($, turn)
   const run: QueryRun = {
-    ...(step ? { step } : {}),
     id: e.tool_use_id,
     turn,
     t: Date.now(),
@@ -1418,49 +1293,6 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'blackbox-mods',
       description: 'Blackbox 패널을 연다 (탭: 세션 로그·결정 사항·Git·워크 트리·스킬 사용량·암묵적 합의)',
-    })
-    await $.tool.register({
-      name: PLAN_TOOL,
-      description:
-        'Claude 가 할 작업들을 사용자가 보는 Blackbox 패널에 기록한다. 여러 단계 작업을 시작하기 전에 목표와 단계를 보내고, 단계 상태가 바뀔 때마다 같은 목표로 전체 단계를 다시 보낸다(같은 목표는 한 항목으로 갱신된다). 나란히 할 수 있는 단계는 after 로 같은 앞 단계를 가리킨다.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          goal: { type: 'string', description: '무엇을 밝히거나 만들려는지 한 문장. 같은 계획을 갱신할 때는 같은 문장을 쓴다' },
-          steps: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                text: { type: 'string', description: '단계 하나: 무엇을 어떻게 하는지' },
-                label: { type: 'string', description: '다이어그램 상자에 쓸 10자 안팎의 짧은 이름' },
-                status: { type: 'string', enum: ['todo', 'doing', 'done', 'skipped'] },
-                after: {
-                  type: 'array',
-                  items: { type: 'integer' },
-                  description: '이 단계가 기다리는 앞 단계 번호(1부터). 빈 배열이면 시작 단계. 빼면 바로 앞 단계',
-                },
-                hypotheses: {
-                  type: 'array',
-                  description: '판단 단계에서 세운 가설과 판정. 흐름 그림의 그 단계 아래에 보인다',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      text: { type: 'string', description: '가설 내용 한 줄' },
-                      verdict: { type: 'string', enum: ['adopted', 'rejected', 'open'], description: 'adopted 채택, rejected 기각, open 검토 중' },
-                      evidence: { type: 'string', description: '판정 근거 한 줄' },
-                    },
-                    required: ['text', 'verdict'],
-                  },
-                },
-              },
-              required: ['text', 'status'],
-            },
-          },
-        },
-        required: ['goal', 'steps'],
-      },
-      isDeferred: false,
     })
     await $.tool.register({
       name: DECISION_TOOL,
@@ -1671,29 +1503,6 @@ export const register: Register = (on, options) => {
     return ran
   })
 
-  on('tool.call', { tool: `mcp__blackbox-mods__${PLAN_TOOL}` }, async ($, e) => {
-    const input = e as unknown as { goal?: unknown; steps?: unknown }
-    const steps: PlanStep[] = Array.isArray(input.steps)
-      ? input.steps.map((step, index) => ({
-          text: String(step?.text ?? ''),
-          label: typeof step?.label === 'string' ? step.label : '',
-          after: Array.isArray(step?.after)
-            ? step.after.map(Number).filter((n: number) => Number.isInteger(n) && n >= 1 && n <= index)
-            : index > 0
-              ? [index]
-              : [],
-          status: (['todo', 'doing', 'done', 'skipped'] as const).includes(step?.status) ? step.status : 'todo',
-          ...(Array.isArray(step?.hypotheses) && step.hypotheses.length > 0 ? { hypotheses: hypothesesOf(step.hypotheses) } : {}),
-        }))
-      : []
-    const plan: Plan = { id: e.tool_use_id, t: Date.now(), at: timeNow(), turn: await currentTurn($), goal: String(input.goal ?? ''), steps }
-    await update($, plans, list => upsertPlan(list, plan))
-    await update($, tab, () => 'log' as TabId)
-    void $.ui.open({ id: LOG_PANE, title: 'Blackbox' }).catch(() => undefined)
-
-    return { result: `계획을 Blackbox 패널에 기록했다 (${steps.length}단계).` }
-  })
-
   on('command.run', { command: 'blackbox-mods' }, async $ => {
     await $.ui.open({ id: LOG_PANE, title: 'Blackbox' })
     await refreshTree($).catch(() => undefined)
@@ -1742,7 +1551,6 @@ export const register: Register = (on, options) => {
     }
     const allDecisions = await read($, decisions)
     const entries = [
-      ...(await read($, plans)).map(plan => ({ kind: 'plan' as const, t: plan.t, turn: plan.turn ?? 0, at: plan.at, plan })),
       ...(await read($, runs)).map(run => ({ kind: 'run' as const, t: run.t ?? 0, turn: run.turn ?? 0, at: run.at, run })),
       ...(await read($, reads)).map(entry => ({ kind: 'read' as const, t: entry.t, turn: entry.turn, at: entry.at, entry })),
       ...(await read($, actions)).map(action => ({ kind: 'action' as const, t: action.t, turn: action.turn, at: action.at, action })),
@@ -1810,15 +1618,13 @@ export const register: Register = (on, options) => {
       </Box>
     )
     type LogItem = (typeof entries)[number]
-    /** 기록 머리. main 은 ▌ 큰 머리, sub 는 단계 묶음 안의 ▸ 작은 머리, none 은 머리 없음 */
-    const head = (name: string, color: string, level: 'main' | 'sub' | 'none') =>
-      level === 'none' ? null : (
-        <Box flexDirection="row" marginTop={level === 'main' ? 1 : 0}>
-          <Text bold color={color}>{`${level === 'main' ? '▌' : '▸'} ${name}`}</Text>
-        </Box>
-      )
-    const entryView = (item: LogItem, level: 'main' | 'sub' | 'none') => {
-      if (item.kind === 'plan') return null
+    /** 기록 머리: 종류를 색 있는 ▌ 줄로 보인다 */
+    const head = (name: string, color: string) => (
+      <Box flexDirection="row" marginTop={1}>
+        <Text bold color={color}>{`▌ ${name}`}</Text>
+      </Box>
+    )
+    const entryView = (item: LogItem) => {
       if (item.kind === 'read') {
         const entry = item.entry
         const text = [
@@ -1828,7 +1634,7 @@ export const register: Register = (on, options) => {
         ].join('\n')
         return (
           <Box flexDirection="column">
-            {head('파일 읽기', KIND_COLOR.read, level)}
+            {head('파일 읽기', KIND_COLOR.read)}
             <Markdown text={text} />
           </Box>
         )
@@ -1839,8 +1645,8 @@ export const register: Register = (on, options) => {
         if (action.kind === 'file') {
           return (
             <Box flexDirection="column">
-              {head(`파일 ${action.note}`, KIND_COLOR.file, level)}
-              <Text color={KIND_COLOR.file}>{level === 'none' ? `파일 ${action.note}: ${action.target}` : `  ${action.target}`}</Text>
+              {head(`파일 ${action.note}`, KIND_COLOR.file)}
+              <Text color={KIND_COLOR.file}>{`  ${action.target}`}</Text>
             </Box>
           )
         }
@@ -1854,7 +1660,7 @@ export const register: Register = (on, options) => {
         ].join('\n')
         return (
           <Box flexDirection="column">
-            {head('명령', KIND_COLOR.command, level)}
+            {head('명령', KIND_COLOR.command)}
             <Markdown text={text} />
           </Box>
         )
@@ -1872,7 +1678,7 @@ export const register: Register = (on, options) => {
       ].join('\n')
       return (
         <Box flexDirection="column">
-          {head('쿼리', KIND_COLOR.query, level)}
+          {head('쿼리', KIND_COLOR.query)}
           <Markdown text={text} />
           {run.status !== 'running' && <Markdown text={lines.slice(0, OUTPUT_LINES).join('\n')} />}
           {isCut && <Text dimColor>{`결과 앞 ${OUTPUT_LINES}줄만 보인다 (전체 ${lines.length}줄)`}</Text>}
@@ -1908,32 +1714,12 @@ export const register: Register = (on, options) => {
                 <Button key="log-next" label="Next ▶" dimColor={page === logGroups.length - 1} onPress={() => turnPage(1)} />
               </Box>
             )}
-            {shownGroups.map(group => {
-              const planItems = group.items.flatMap(item => (item.kind === 'plan' ? [item.plan] : []))
-              const records = group.items.filter(item => item.kind !== 'plan')
-              const isInPlan = (item: LogItem) => planItems.some(plan => sameStepIn(plan, stepOfItem(item)))
-              const outside = records.filter(item => !isInPlan(item))
-              const section = (title: string, items: LogItem[]) =>
-                items.length === 0 ? [] : [head(title, KIND_COLOR.plan, 'main'), ...items.map(item => entryView(item, items.length > 1 ? 'sub' : 'none'))]
-              return (
-                <Box flexDirection="column" marginBottom={1}>
-                  {groupHead(group.at, group.heading)}
-                  {planItems.length === 0 && records.map(item => entryView(item, 'main'))}
-                  {planItems.flatMap(plan => [
-                    head('작업 계획', KIND_COLOR.plan, 'main'),
-                    <Markdown text={mdField('목표', plan.goal)} />,
-                    <Text bold>{planDiagram(plan.steps, width)}</Text>,
-                    ...plan.steps.flatMap((step, index) =>
-                      section(
-                        `${index + 1}. ${stepLabel(step)}`,
-                        records.filter(item => sameStep(stepOfItem(item), { goal: plan.goal, n: index + 1 })),
-                      ),
-                    ),
-                  ])}
-                  {planItems.length > 0 && section('단계 밖', outside)}
-                </Box>
-              )
-            })}
+            {shownGroups.map(group => (
+              <Box flexDirection="column" marginBottom={1}>
+                {groupHead(group.at, group.heading)}
+                {group.items.map(item => entryView(item))}
+              </Box>
+            ))}
           </Box>
         )}
         {current === 'decisions' && (
