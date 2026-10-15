@@ -1052,12 +1052,6 @@ export function columnsOf(text: string): number {
   return width
 }
 
-/** ── 제목 ──── 형태의 구분선 */
-export function separator(title: string, width: number): string {
-  const head = `── ${title} `
-  return head + '─'.repeat(Math.max(2, width - columnsOf(head)))
-}
-
 /** 보는 묶음의 위치. 고른 묶음이 없거나 사라졌으면 마지막 묶음이다 */
 export function pageIndex(keys: string[], selected: string): number {
   const at = selected ? keys.indexOf(selected) : -1
@@ -1630,7 +1624,6 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: LOG_PANE }, async ($, e) => {
     const { Box, Text, Button, Code, Markdown, Link } = $.ui.resolve(e)
     const current = await read($, tab)
-    const width = Math.max(30, Math.min(100, (e.props?.bodyColumns ?? 80) - 2))
     const turnList = await read($, turns)
     const turnOf = (n: number) => turnList.find(one => one.n === n)
     /** 요청 묶음 머리: 색 있는 요청 시각과 그 아래 요청 요약 제목 */
@@ -1657,11 +1650,11 @@ export const register: Register = (on, options) => {
     const page = pageIndex(logKeys, selectedPage)
     const shownGroups = logGroups.slice(page, page + 1)
     const turnPage = (step: number) => update($, logPage, current => movePage(logKeys, current, step))
-    const decisionGroups: { turn: number; title: string; items: Decision[] }[] = []
+    const decisionGroups: { turn: number; at: string; heading: string; items: Decision[] }[] = []
     for (const one of allDecisions) {
       const group = decisionGroups.find(g => g.turn === (one.turn ?? 0) && (one.turn ?? 0) > 0)
       if (group) group.items.push(one)
-      else decisionGroups.push({ turn: one.turn ?? 0, title: turnOf(one.turn ?? 0)?.summary ?? `(요청 기록 없음) ${one.at}`, items: [one] })
+      else decisionGroups.push({ turn: one.turn ?? 0, ...headOf(one.turn ?? 0, one.at), items: [one] })
     }
     decisionGroups.reverse()
     const pendingCount = allDecisions.filter(one => one.status === 'pending').length
@@ -1819,7 +1812,7 @@ export const register: Register = (on, options) => {
             {decisionGroups.length === 0 && <Text dimColor>아직 결정 사항이 없다.</Text>}
             {decisionGroups.map(group => (
               <Box flexDirection="column" marginTop={1}>
-                <Text bold color="claude">{separator(group.title, width)}</Text>
+                {groupHead(group.at, group.heading)}
                 {group.items.map(one => {
                   const box = one.status === 'pending' ? '[ ]' : one.status === 'decided' ? '[x]' : '[-]'
                   const result = one.status === 'dropped' ? ` => 취소${one.answer ? `: ${one.answer}` : ''}` : one.answer ? ` => ${one.answer}` : ''
@@ -1975,7 +1968,6 @@ export const register: Register = (on, options) => {
               ))}
               {consulted.length > 0 && (
                 <Box flexDirection="column" marginTop={1}>
-                  <Text dimColor>{'─'.repeat(width)}</Text>
                   <Text bold dimColor>{`참고한 이슈·PR  ${consulted.length}건`}</Text>
                   {groupByRepo(consulted).map(group => (
                     <Box flexDirection="column">
