@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { ActionEntry, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
+import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, separator, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; actions: ActionEntry[] } = { runs: [], actions: [] }
@@ -224,6 +224,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(at('제목 a/x#3')).toBeLessThan(at('제목 a/x#1'))
     expect(at('제목 a/x#1')).toBeLessThan(at('▸ b/y'))
     expect(at('▸ b/y')).toBeLessThan(at('제목 b/y#1'))
+    // 참고 항목이 없으면 구분선도 없다
+    expect(pane).not.toContain('─────')
     expect(pane).toContain('3건')
   })
 }
@@ -310,6 +312,11 @@ test('splits refs this session handled from refs it only mentioned', async () =>
   expect(all[2]?.sources).toEqual(['gh issue view'])
 })
 
+test('shows only prompt and answer sources for referenced refs', async () => {
+  expect(shownSources(['사용자 프롬프트', 'gh issue list', 'gh pr view', '명령 결과', 'Claude 답변'])).toEqual(['사용자 프롬프트', 'Claude 답변'])
+  expect(shownSources(['gh issue view'])).toEqual([])
+})
+
 test('groups handled refs and commits without an issue by repository, unknown repository last', async () => {
   const ref = (owner: string, repo: string, number: number, order: number) => ({ key: `${owner}/${repo}#${number}`, owner, repo, number, isPull: false, url: '', order, sources: [], actions: ['create'] })
   const commit = (sha: string, repo: string | undefined, order: number) => ({ sha, branch: 'b', repo, subject: sha, refs: [], order })
@@ -355,7 +362,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const at = (text: string) => pane.indexOf(text)
     expect(pane).toContain('처리 1건 · 참고 2건')
     expect(pane).toContain('▸ o/r  1건')
-    expect(pane).toContain('생성')
+    // 처리 줄에는 동작 이름을 보이지 않는다
+    expect(pane).not.toContain('생성')
     expect(pane).toContain('▸ 저장소 모름')
     // 커밋만 있는 저장소는 머리줄에 건수를 붙이지 않는다
     expect(pane).toContain('"▸ w/z"')
@@ -368,7 +376,13 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(at('참고한 이슈·PR')).toBeLessThan(at('제목 o/r#28'))
     expect(at('참고한 이슈·PR')).toBeLessThan(at('제목 p/q#27'))
     expect(pane).toContain('사용자 프롬프트')
-    expect(pane).toContain('gh pr view')
+    // 참고 줄에는 gh 명령 이름과 명령 결과를 보이지 않는다
+    expect(pane).not.toContain('gh pr view')
+    expect(pane).not.toContain('명령 결과')
+    // 참고 머리줄 바로 위에 구분선
+    expect(at('9a8b7c6')).toBeLessThan(at('─────'))
+    expect(at('─────')).toBeLessThan(at('참고한 이슈·PR'))
+    expect(pane.slice(at('─────'), at('참고한 이슈·PR'))).not.toContain('#')
     expect(pane).not.toContain('이 세션에서 처리한 GitHub 이슈·PR 과 커밋이 없다.')
   })
 }

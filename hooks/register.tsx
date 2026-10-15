@@ -595,6 +595,11 @@ export function handledActions(ref: IssueRef, commitCount: number): string[] {
   return done.length === 0 && commitCount > 0 ? ['커밋'] : done
 }
 
+/** 참고 목록에 보일 출처: gh 명령 이름과 명령 결과는 빼고 사용자 프롬프트·Claude 답변만 남긴다 */
+export function shownSources(sources: readonly string[]): string[] {
+  return sources.filter(source => !source.startsWith('gh ') && source !== '명령 결과')
+}
+
 /** 이 세션에서 처리한 것(쓰기 동작이나 커밋이 닿은 것)과 언급만 한 것(참고)으로 나눈다 */
 export function splitHandled(
   refs: readonly IssueRef[],
@@ -1942,7 +1947,6 @@ export const register: Register = (on, options) => {
                     const isPull = hasMeta ? meta.isPull : ref.isPull
                     const url = ref.url.replace(/\/(issues|pull)\//, isPull ? '/pull/' : '/issues/')
                     const badge = stateBadge(meta, ref.isPull)
-                    const done = handledActions(ref, linked.byKey[ref.key]?.length ?? 0)
                     return (
                       <Box flexDirection="column">
                         <Box flexDirection="row">
@@ -1954,7 +1958,6 @@ export const register: Register = (on, options) => {
                           {hasMeta && meta.isPull && <Text color="error">{`−${meta.deletions.toLocaleString('en-US')}  `}</Text>}
                           {hasMeta && meta.isPull && <Text color={CI_BADGE[meta.ci].color}>{`${CI_BADGE[meta.ci].text}  `}</Text>}
                           {hasMeta && !meta.isPull && <Text dimColor>{`${cut(meta.title, 60)}  `}</Text>}
-                          {done.length > 0 && <Text color="suggestion">{done.join(' · ')}</Text>}
                         </Box>
                         {hasMeta && meta.isPull && <Text dimColor>{`        ${cut(meta.title, 80)}`}</Text>}
                         {!hasMeta && <Text dimColor>{`        ${meta && 'error' in meta ? `읽지 못함: ${meta.error}` : '읽는 중…'}`}</Text>}
@@ -1972,6 +1975,7 @@ export const register: Register = (on, options) => {
               ))}
               {consulted.length > 0 && (
                 <Box flexDirection="column" marginTop={1}>
+                  <Text dimColor>{'─'.repeat(width)}</Text>
                   <Text bold dimColor>{`참고한 이슈·PR  ${consulted.length}건`}</Text>
                   {groupByRepo(consulted).map(group => (
                     <Box flexDirection="column">
@@ -1987,7 +1991,7 @@ export const register: Register = (on, options) => {
                             <Text color={badge.color}>{`    ${badge.text}  `}</Text>
                             <Link href={url} label={`#${ref.number}`} />
                             <Text dimColor>{`  ${hasMeta ? cut(meta.title, 60) : '읽는 중…'}  `}</Text>
-                            <Text dimColor>{ref.sources.join(' · ')}</Text>
+                            <Text dimColor>{shownSources(ref.sources).join(' · ')}</Text>
                           </Box>
                         )
                       })}
