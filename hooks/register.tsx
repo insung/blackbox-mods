@@ -1206,6 +1206,22 @@ async function answerPicked($: EngineInterface, option: string): Promise<void> {
   await update($, pickedAgreements, () => [])
 }
 
+/** 이슈·PR 을 내장 브라우저로 열어 달라는 요청문. 쓰던 글이 있으면 그 뒤 줄에 붙인다 */
+export function browserLine(url: string, draft: string): string {
+  const line = `내장 브라우저로 ${url} 열어줘`
+  return draft.trim() ? `${draft.replace(/\s+$/, '')}\n${line}` : line
+}
+
+/**
+ * 이슈·PR 을 Claude 앱 내장 브라우저에서 열도록 프롬프트 창에 요청문을 채운다. 보내기는 사용자가 한다.
+ * 모드가 내장 브라우저 MCP 를 직접 부르면 auto mode 분류기가 거부하므로 Claude 에게 맡긴다
+ */
+async function askToOpen($: EngineInterface, url: string): Promise<void> {
+  const box = await $.prompt.read()
+  const filled = await $.prompt.fill({ text: browserLine(url, box.text), mode: 'replace' })
+  if (!filled.isFilled) $.ui.toast(`프롬프트 창을 채우지 못했다. 직접 입력한다: 내장 브라우저로 ${url} 열어줘`)
+}
+
 async function openInVsCode($: EngineInterface, path: string): Promise<void> {
   const ran = await $.process.run(['sh', '-c', OPEN_IN_VSCODE, 'sh', path], { timeoutMs: 15000 }).catch(error => ({
     exitCode: 1,
@@ -1621,6 +1637,13 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: LOG_PANE }, async ($, e) => {
     const { Box, Text, Button, Code, Markdown, Link } = $.ui.resolve(e)
+    /** 데스크톱 앱에서는 이슈·PR 번호를 누르면 내장 브라우저로 열어 달라는 요청문을 채우고, 다른 표면에서는 링크로 둔다 */
+    const issueLink = (url: string, label: string) =>
+      e.surface === 'desktop' ? (
+        <Button key={`issue-${url}`} label={label} plain onPress={() => void askToOpen($, url)} />
+      ) : (
+        <Link href={url} label={label} />
+      )
     const current = await read($, tab)
     const turnList = await read($, turns)
     const turnOf = (n: number) => turnList.find(one => one.n === n)
@@ -1942,7 +1965,7 @@ export const register: Register = (on, options) => {
                       <Box flexDirection="column">
                         <Box flexDirection="row">
                           <Text bold color={badge.color}>{`  ${badge.text}  `}</Text>
-                          <Link href={url} label={`#${ref.number}`} />
+                          {issueLink(url, `#${ref.number}`)}
                           <Text>{'  '}</Text>
                           {hasMeta && meta.isPull && <Text dimColor>{`${meta.branch}  `}</Text>}
                           {hasMeta && meta.isPull && <Text color="success">{`+${meta.additions.toLocaleString('en-US')} `}</Text>}
@@ -1979,7 +2002,7 @@ export const register: Register = (on, options) => {
                         return (
                           <Box flexDirection="row">
                             <Text color={badge.color}>{`    ${badge.text}  `}</Text>
-                            <Link href={url} label={`#${ref.number}`} />
+                            {issueLink(url, `#${ref.number}`)}
                             <Text dimColor>{`  ${hasMeta ? cut(meta.title, 60) : '읽는 중…'}  `}</Text>
                             <Text dimColor>{shownSources(ref.sources).join(' · ')}</Text>
                           </Box>
