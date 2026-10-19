@@ -1206,18 +1206,20 @@ async function answerPicked($: EngineInterface, option: string): Promise<void> {
   await update($, pickedAgreements, () => [])
 }
 
-/** 데스크톱 앱 내장 브라우저(Browser pane)의 MCP 서버 이름 */
-export const BROWSER_SERVER = 'Claude_Browser'
+/** 이슈·PR 을 내장 브라우저로 열어 달라는 요청문. 쓰던 글이 있으면 그 뒤 줄에 붙인다 */
+export function browserLine(url: string, draft: string): string {
+  const line = `내장 브라우저로 ${url} 열어줘`
+  return draft.trim() ? `${draft.replace(/\s+$/, '')}\n${line}` : line
+}
 
-/** 이슈·PR 링크를 Claude 앱 내장 브라우저에서 연다. 부르지 못하면 시스템 브라우저로 연다 */
-async function openInBrowser($: EngineInterface, url: string): Promise<void> {
-  const opened = await $.mcp
-    .call(BROWSER_SERVER, 'preview_start', { url })
-    .then(result => !result.isError)
-    .catch(() => false)
-  if (opened) return
-  const ran = await $.process.run(['open', url], { timeoutMs: 15000 }).catch(error => ({ exitCode: 1, stdout: '', stderr: String(error) }))
-  $.ui.toast(ran.exitCode === 0 ? `내장 브라우저를 열지 못해 시스템 브라우저로 열었다: ${url}` : `링크를 열지 못했다: ${ran.stderr.trim().split('\n')[0] ?? ''}`)
+/**
+ * 이슈·PR 을 Claude 앱 내장 브라우저에서 열도록 프롬프트 창에 요청문을 채운다. 보내기는 사용자가 한다.
+ * 모드가 내장 브라우저 MCP 를 직접 부르면 auto mode 분류기가 거부하므로 Claude 에게 맡긴다
+ */
+async function askToOpen($: EngineInterface, url: string): Promise<void> {
+  const box = await $.prompt.read()
+  const filled = await $.prompt.fill({ text: browserLine(url, box.text), mode: 'replace' })
+  if (!filled.isFilled) $.ui.toast(`프롬프트 창을 채우지 못했다. 직접 입력한다: 내장 브라우저로 ${url} 열어줘`)
 }
 
 async function openInVsCode($: EngineInterface, path: string): Promise<void> {
@@ -1635,10 +1637,10 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: LOG_PANE }, async ($, e) => {
     const { Box, Text, Button, Code, Markdown, Link } = $.ui.resolve(e)
-    /** 데스크톱 앱에서는 이슈·PR 번호를 누르면 내장 브라우저에서 열고, 다른 표면에서는 링크로 둔다 */
+    /** 데스크톱 앱에서는 이슈·PR 번호를 누르면 내장 브라우저로 열어 달라는 요청문을 채우고, 다른 표면에서는 링크로 둔다 */
     const issueLink = (url: string, label: string) =>
       e.surface === 'desktop' ? (
-        <Button key={`issue-${url}`} label={label} plain onPress={() => void openInBrowser($, url)} />
+        <Button key={`issue-${url}`} label={label} plain onPress={() => void askToOpen($, url)} />
       ) : (
         <Link href={url} label={label} />
       )

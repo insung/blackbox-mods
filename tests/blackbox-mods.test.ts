@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { ActionEntry, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
+import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, browserLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; actions: ActionEntry[] } = { runs: [], actions: [] }
@@ -1125,49 +1125,39 @@ test('opens the panel only when /blackbox-mods runs', async ($, on) => {
   expect(pane).toContain('결정 사항 (1)')
 })
 
-function answerIssue(on: any, calls: { server: string; tool: string; args: Record<string, unknown> }[], runs: string[][], isError: boolean) {
+function answerIssue(on: any, fills: string[], draft = '') {
   on('session.messages', async () => ({
     value: [{ role: 'assistant', text: '', toolUses: [{ tool: 'Bash', input: { command: 'gh issue close 7 --repo a/x' }, text: '' }] }],
   }) as any)
   on('session.cwd', async () => ({ value: '/tmp' }) as any)
-  on('ui.toast', async () => ({ value: undefined }) as any)
-  on('mcp.call', async (_$: unknown, e: any) => {
-    calls.push(e)
-    return { value: { content: [], isError } } as any
+  on('prompt.read', async () => ({ value: { text: draft, cursor: 0 } }) as any)
+  on('prompt.fill', async (_$: unknown, e: any) => {
+    fills.push(e.text)
+    return { isFilled: true } as any
   })
   on('process.run', async (_$: unknown, e: any) => {
-    runs.push(e.argv)
-    if (e.argv[0] === 'open') return { value: { exitCode: 0, stdout: '', stderr: '' } } as any
     if (e.argv[0] !== 'sh' || String(e.argv[2] ?? '').includes('rev-parse')) return { value: { exitCode: 1, stdout: '', stderr: '' } } as any
     return { value: { exitCode: 0, stdout: 'issue\n{"title":"제목 7","state":"OPEN","stateReason":""}', stderr: '' } } as any
   })
 }
 
-test('opens an issue in the built-in browser when its number is pressed on desktop', async ($, on) => {
-  const calls: { server: string; tool: string; args: Record<string, unknown> }[] = []
-  const runs: string[][] = []
-  answerIssue(on, calls, runs, false)
-  await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'desktop' } as any)
-  await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface: 'desktop' } as any)
-  await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'desktop' } as any)
-  await $.ui.press({ plugin: 'blackbox-mods', key: 'issue-https://github.com/a/x/issues/7', surface: 'desktop' } as any)
-  expect(calls).toEqual([{ server: 'Claude_Browser', tool: 'preview_start', args: { url: 'https://github.com/a/x/issues/7' } }])
-  expect(runs.some(argv => argv[0] === 'open')).toBe(false)
+test('writes the request to open a link in the built-in browser after any draft', async () => {
+  expect(browserLine('https://github.com/a/x/issues/7', '')).toBe('내장 브라우저로 https://github.com/a/x/issues/7 열어줘')
+  expect(browserLine('https://github.com/a/x/issues/7', '먼저 쓴 글  \n')).toBe('먼저 쓴 글\n내장 브라우저로 https://github.com/a/x/issues/7 열어줘')
 })
 
-test('opens the system browser when the built-in browser fails', async ($, on) => {
-  const calls: { server: string; tool: string; args: Record<string, unknown> }[] = []
-  const runs: string[][] = []
-  answerIssue(on, calls, runs, true)
+test('fills the prompt to open an issue in the built-in browser when its number is pressed on desktop', async ($, on) => {
+  const fills: string[] = []
+  answerIssue(on, fills)
   await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'desktop' } as any)
   await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface: 'desktop' } as any)
   await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'desktop' } as any)
   await $.ui.press({ plugin: 'blackbox-mods', key: 'issue-https://github.com/a/x/issues/7', surface: 'desktop' } as any)
-  expect(runs.find(argv => argv[0] === 'open')).toEqual(['open', 'https://github.com/a/x/issues/7'])
+  expect(fills).toEqual(['내장 브라우저로 https://github.com/a/x/issues/7 열어줘'])
 })
 
 test('keeps the issue number a link on terminal', async ($, on) => {
-  answerIssue(on, [], [], false)
+  answerIssue(on, [])
   await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any)
   await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface: 'terminal' } as any)
   const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any))
