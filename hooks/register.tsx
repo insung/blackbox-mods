@@ -2138,7 +2138,7 @@ export const register: Register = (on, options) => {
                         key={`note-${one.id}`}
                         value={one.text}
                         rows={noteRows(one.text, wideIds.includes(one.id))}
-                        submitLabel=""
+                        submitLabel="저장"
                         onInput={value => void update($, notes, list => editNote(list, one.id, value))}
                         onSubmit={value => void update($, notes, list => editNote(list, one.id, value))}
                       />
