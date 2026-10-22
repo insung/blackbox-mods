@@ -20,6 +20,8 @@ const QUERY_COMMAND = /run_query\.py|(^|[\s;&|])mysql\s/
 const OUTPUT_LINES = 30
 /** 세션 로그 항목 머리의 색: 종류마다 다르게 해 항목끼리 구분한다 */
 const KIND_COLOR = { read: 'suggestion', file: 'success', command: 'bashBorder', query: 'permission' } as const
+/** Git 탭의 이슈·PR 번호 색. Link 에는 색 속성이 없어 감싼 Text 로 칠한다 */
+const LINK_COLOR = 'suggestion'
 const AGREEMENT_KINDS = ['premise', 'scope', 'term', 'method', 'reading', 'format'] as const
 const AGREEMENT_KIND_LABEL: Record<Agreement['kind'], string> = {
   premise: '진행 전제',
@@ -530,6 +532,17 @@ export function groupByRepo(refs: readonly IssueRef[]): { repo: string; refs: Is
   return [...groups].map(([repo, list]) => ({ repo, refs: list }))
 }
 
+/** 커밋을 브랜치별로 묶는다. 브랜치와 커밋은 입력 순서를 그대로 쓰고, 브랜치를 모르는 커밋은 '' 묶음 */
+export function groupByBranch(list: readonly SessionCommit[]): { branch: string; commits: SessionCommit[] }[] {
+  const groups = new Map<string, SessionCommit[]>()
+  for (const one of list) {
+    const commits = groups.get(one.branch) ?? []
+    commits.push(one)
+    groups.set(one.branch, commits)
+  }
+  return [...groups].map(([branch, commits]) => ({ branch, commits }))
+}
+
 /** 커밋을 이슈·PR 에 잇는다: 같은 저장소에서 메시지의 번호, 다음으로 PR head 브랜치. 저장소를 모르거나 잇지 못한 커밋은 unlinked */
 export function linkCommits(
   list: SessionCommit[],
@@ -967,13 +980,6 @@ export function stateBadge(meta: IssueMeta | undefined, isPull: boolean): { text
   if (meta.state === 'open') return { text: '◉ 열림', color: 'success' }
   if (meta.stateReason === 'not_planned') return { text: '⊘ 닫힘', color: 'subtle' }
   return { text: '✓ 완료', color: 'merged' }
-}
-
-const CI_BADGE: Record<'pass' | 'fail' | 'pending' | 'none', { text: string; color: string | undefined }> = {
-  pass: { text: '✓ CI', color: 'success' },
-  fail: { text: '✗ CI', color: 'error' },
-  pending: { text: '○ CI', color: 'warning' },
-  none: { text: '○ CI', color: 'subtle' },
 }
 
 async function refreshIssues($: EngineInterface): Promise<void> {
@@ -1635,12 +1641,16 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: LOG_PANE }, async ($, e) => {
     const { Box, Text, Button, Code, Markdown, Link } = $.ui.resolve(e)
-    /** 데스크톱 앱에서는 이슈·PR 번호를 누르면 내장 브라우저에서 열고, 다른 표면에서는 링크로 둔다 */
+    /** 데스크톱 앱에서는 이슈·PR 번호를 누르면 내장 브라우저에서 열고, 다른 표면에서는 링크로 둔다. 번호는 링크 색으로 보인다 */
     const issueLink = (url: string, label: string) =>
       e.surface === 'desktop' ? (
-        <Button key={`issue-${url}`} label={label} plain onPress={() => void openInBrowser($, url)} />
+        <Button key={`issue-${url}`} plain onPress={() => void openInBrowser($, url)}>
+          <Text color={LINK_COLOR}>{label}</Text>
+        </Button>
       ) : (
-        <Link href={url} label={label} />
+        <Text color={LINK_COLOR}>
+          <Link href={url} label={label} />
+        </Text>
       )
     const current = await read($, tab)
     const turnList = await read($, turns)
@@ -1709,6 +1719,14 @@ export const register: Register = (on, options) => {
           <Text dimColor>{`${lead}${n === list.length - 1 ? '└─' : '├─'} `}</Text>
           <Text color="warning">{one.sha}</Text>
           <Text>{` ${cut(one.subject, 70)}`}</Text>
+        </Box>
+      ))
+    /** 커밋을 브랜치 이름 머리줄 아래에 묶는다 */
+    const branchRows = (list: SessionCommit[], lead: string) =>
+      groupByBranch(list).map((group, n, all) => (
+        <Box flexDirection="column">
+          <Text dimColor>{`${lead}${n === all.length - 1 ? '└─' : '├─'} ${group.branch || '(브랜치 모름)'}`}</Text>
+          {commitRows(group.commits, `${lead}     `)}
         </Box>
       ))
     const hits = await read($, skillHits)
@@ -1964,23 +1982,17 @@ export const register: Register = (on, options) => {
                         <Box flexDirection="row">
                           <Text bold color={badge.color}>{`  ${badge.text}  `}</Text>
                           {issueLink(url, `#${ref.number}`)}
-                          <Text>{'  '}</Text>
-                          {hasMeta && meta.isPull && <Text dimColor>{`${meta.branch}  `}</Text>}
-                          {hasMeta && meta.isPull && <Text color="success">{`+${meta.additions.toLocaleString('en-US')} `}</Text>}
-                          {hasMeta && meta.isPull && <Text color="error">{`−${meta.deletions.toLocaleString('en-US')}  `}</Text>}
-                          {hasMeta && meta.isPull && <Text color={CI_BADGE[meta.ci].color}>{`${CI_BADGE[meta.ci].text}  `}</Text>}
-                          {hasMeta && !meta.isPull && <Text dimColor>{`${cut(meta.title, 60)}  `}</Text>}
+                          {hasMeta && <Text>{`  ${cut(meta.title, 70)}`}</Text>}
                         </Box>
-                        {hasMeta && meta.isPull && <Text dimColor>{`        ${cut(meta.title, 80)}`}</Text>}
                         {!hasMeta && <Text dimColor>{`        ${meta && 'error' in meta ? `읽지 못함: ${meta.error}` : '읽는 중…'}`}</Text>}
-                        {commitRows(linked.byKey[ref.key] ?? [], '        ')}
+                        {branchRows(linked.byKey[ref.key] ?? [], '        ')}
                       </Box>
                     )
                   })}
                   {group.commits.length > 0 && (
                     <Box flexDirection="column">
                       <Text bold>{`  이슈 없는 커밋  ${group.commits.length}건`}</Text>
-                      {commitRows(group.commits, '        ')}
+                      {branchRows(group.commits, '        ')}
                     </Box>
                   )}
                 </Box>
@@ -1989,7 +2001,7 @@ export const register: Register = (on, options) => {
                 <Box flexDirection="column" marginTop={1}>
                   <Text bold dimColor>{`참고한 이슈·PR  ${consulted.length}건`}</Text>
                   {groupByRepo(consulted).map(group => (
-                    <Box flexDirection="column">
+                    <Box flexDirection="column" marginTop={1}>
                       <Text dimColor>{`  ▸ ${group.repo}`}</Text>
                       {group.refs.map(ref => {
                         const meta = metas[ref.key]
@@ -2001,8 +2013,7 @@ export const register: Register = (on, options) => {
                           <Box flexDirection="row">
                             <Text color={badge.color}>{`    ${badge.text}  `}</Text>
                             {issueLink(url, `#${ref.number}`)}
-                            <Text dimColor>{`  ${hasMeta ? cut(meta.title, 60) : '읽는 중…'}  `}</Text>
-                            <Text dimColor>{shownSources(ref.sources).join(' · ')}</Text>
+                            <Text dimColor>{`  ${hasMeta ? cut(meta.title, 70) : '읽는 중…'}`}</Text>
                           </Box>
                         )
                       })}

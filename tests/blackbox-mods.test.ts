@@ -180,10 +180,18 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(pane).toContain('⎇ 머지됨')
     expect(pane).toContain('#35')
     expect(pane).toContain('https://github.com/o/dmp.crawler/pull/35')
-    expect(pane).toContain('docs/o-rk-a-rk-reverse-engineering')
-    expect(pane).toContain('+4,079')
-    expect(pane).toContain('−761')
-    expect(pane).toContain('○ CI')
+    // PR 도 번호 옆에 제목을 두고, 디프 수치와 CI 는 보이지 않는다
+    expect(pane.indexOf('#35')).toBeLessThan(pane.indexOf('역공학 문서'))
+    expect(pane).not.toContain('+4,079')
+    expect(pane).not.toContain('−761')
+    expect(pane).not.toContain('○ CI')
+    // 커밋은 브랜치 이름 머리줄 아래에 묶인다
+    expect(pane.indexOf('역공학 문서')).toBeLessThan(pane.indexOf('docs/o-rk-a-rk-reverse-engineering'))
+    expect(pane.indexOf('docs/o-rk-a-rk-reverse-engineering')).toBeLessThan(pane.indexOf('5d6e7f8'))
+    expect(pane.indexOf('제목 9')).toBeLessThan(pane.indexOf('fix/9'))
+    expect(pane.indexOf('fix/9')).toBeLessThan(pane.indexOf('1a2b3c4'))
+    // 번호는 링크 색으로 보인다
+    expect(pane).toContain('"color":"suggestion"')
     expect(pane).toContain('✓ 완료')
     expect(pane).toContain('제목 9')
   })
@@ -375,8 +383,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(at('9a8b7c6')).toBeLessThan(at('참고한 이슈·PR  2건'))
     expect(at('참고한 이슈·PR')).toBeLessThan(at('제목 o/r#28'))
     expect(at('참고한 이슈·PR')).toBeLessThan(at('제목 p/q#27'))
-    expect(pane).toContain('사용자 프롬프트')
-    // 참고 줄에는 gh 명령 이름과 명령 결과를 보이지 않는다
+    // 참고 줄에는 출처(사용자 프롬프트·Claude 답변), gh 명령 이름, 명령 결과를 보이지 않는다
+    expect(pane).not.toContain('사용자 프롬프트')
     expect(pane).not.toContain('gh pr view')
     expect(pane).not.toContain('명령 결과')
     // 참고 머리줄 위에 가로 구분선을 두지 않는다 (좁은 창에서 다음 줄로 넘어간다)
