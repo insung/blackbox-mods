@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { ActionEntry, Agreement, Decision, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn, Worktree } from '../types'
+import type { ActionEntry, Agreement, Decision, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn } from '../types'
 
 const LOG_PANE = 'blackbox-mods'
 const TABS: { id: TabId; label: string }[] = [
@@ -1135,44 +1135,40 @@ async function rememberPlace($: EngineInterface, dir: string | undefined): Promi
   return true
 }
 
-async function repoRootOf($: EngineInterface, dir: string): Promise<string | undefined> {
-  const listed = await $.process.run(['git', '-C', dir, 'worktree', 'list', '--porcelain'])
-  if (listed.exitCode !== 0) return undefined
-  return parseWorktrees(listed.stdout)[0]?.path
+/** 폴더를 품은 워크트리 중 가장 안쪽 것. 메인 체크아웃 안에 둔 워크트리(.worktree/…)를 메인과 가른다 */
+export function worktreeOf<T extends { path: string }>(dir: string, entries: readonly T[]): T | undefined {
+  return entries.filter(entry => isInside(dir, entry.path)).sort((x, y) => y.path.length - x.path.length)[0]
 }
 
+/** 이 세션이 Edit·Write 로 바꾼 파일을 워크트리별로 묶는다. 파일을 바꾼 워크트리만 남기고, 저장소·워크트리·파일은 처음 바꾼 순서를 쓴다 */
 async function refreshTree($: EngineInterface): Promise<void> {
   const cwd = await $.session.cwd()
-  const used = [...new Set([cwd, ...(await read($, places))])]
-  const roots: string[] = []
-  for (const dir of used) {
-    const root = await repoRootOf($, dir).catch(() => undefined)
-    if (root && !roots.includes(root)) roots.push(root)
-  }
+  const files = [...new Set((await read($, actions)).filter(one => one.kind === 'file' && one.status === 'done').map(one => one.target))]
   const repos: RepoView[] = []
-  for (const root of roots) {
-    const listed = await $.process.run(['git', '-C', root, 'worktree', 'list', '--porcelain'])
-    const entries = parseWorktrees(listed.stdout)
-    const worktrees: Worktree[] = []
-    for (const [index, entry] of entries.entries()) {
-      const nested = entries.filter(other => other.path !== entry.path && isInside(other.path, entry.path))
-      const owns = (dir: string) => isInside(dir, entry.path) && !nested.some(other => isInside(dir, other.path))
-      const isUsed = used.some(owns)
-      const status = isUsed
-        ? await $.process.run(['git', '-C', entry.path, 'status', '--porcelain']).catch(() => undefined)
-        : undefined
-      worktrees.push({
-        path: entry.path,
-        branch: entry.branch || '(branch 없음)',
-        isMain: index === 0,
-        isUsed,
-        isCwd: owns(cwd),
-        changes: status && status.exitCode === 0 ? status.stdout.split('\n').filter(Boolean).length : null,
-      })
+  const listedOf = new Map<string, { path: string; branch: string }[]>()
+  for (const file of files) {
+    const dir = await resolveDir($, dirOf(file), cwd).catch(() => undefined)
+    if (!dir) continue
+    const listed = await $.process.run(['git', '-C', dir, 'worktree', 'list', '--porcelain']).catch(() => undefined)
+    const entries = listed && listed.exitCode === 0 ? parseWorktrees(listed.stdout) : []
+    const root = entries[0]?.path
+    const entry = worktreeOf(dir, entries)
+    if (!root || !entry) continue
+    if (!listedOf.has(root)) listedOf.set(root, entries)
+    let repo = repos.find(one => one.root === root)
+    if (!repo) {
+      repo = { root, worktrees: [] }
+      repos.push(repo)
     }
-    repos.push({ root, worktrees })
+    let wt = repo.worktrees.find(one => one.path === entry.path)
+    if (!wt) {
+      wt = { path: entry.path, branch: entry.branch || '(branch 없음)', files: [] }
+      repo.worktrees.push(wt)
+    }
+    const path = relativeTo(`${dir}/${file.slice(file.lastIndexOf('/') + 1)}`, entry.path)
+    if (!wt.files.includes(path)) wt.files.push(path)
   }
-  await update($, tree, () => ({ at: timeNow(), cwd, isCwdRepo: roots.some(root => isInside(cwd, root)), repos }))
+  await update($, tree, () => ({ at: timeNow(), repos }))
 }
 
 /** VS Code 로 폴더를 연다. code 명령이 없으면 macOS 의 open 으로 앱을 부른다 */
@@ -1248,7 +1244,7 @@ async function noteTool($: EngineInterface, e: { tool: string } & Record<string,
     const dir = await resolveDir($, target, cwd).catch(() => undefined)
     if (await rememberPlace($, dir)) isNew = true
   }
-  if (isNew || e.tool === 'Bash') await refreshTree($)
+  if (isNew || e.tool !== 'Read') await refreshTree($)
 }
 
 const COMMAND_WIDTH = 120
@@ -1929,31 +1925,22 @@ export const register: Register = (on, options) => {
                 <Button key="refresh-tree" onPress={() => refreshTree($)}>새로고침</Button>
                 <Text dimColor>{view ? `  ${view.at} 기준` : '  아직 읽지 않았다'}</Text>
               </Box>
-              {view && (
-                <Text>{`작업 디렉토리: ${view.cwd}${view.isCwdRepo ? '' : '  (git 저장소 아님)'}`}</Text>
-              )}
-              {view && view.repos.length === 0 && <Text dimColor>이 세션에서 사용한 git 저장소가 없다.</Text>}
+              {view && view.repos.length === 0 && <Text dimColor>이 세션에서 파일을 바꾼 워크트리가 없다.</Text>}
               {view?.repos.map(repo => (
                 <Box flexDirection="column" marginTop={1}>
                   <Text bold>{repo.root}</Text>
                   {repo.worktrees.map((wt, index) => {
-                    const branchLine = index === repo.worktrees.length - 1 ? '└─' : '├─'
-                    const marks = [
-                      wt.isMain ? '메인' : '',
-                      wt.isCwd ? '작업 디렉토리' : wt.isUsed ? '사용 중' : '',
-                      wt.changes !== null ? `변경 ${wt.changes}` : '',
-                    ].filter(Boolean)
-                    const row = (
-                      <Text dimColor={!wt.isUsed} bold={wt.isUsed} color={wt.isUsed ? 'success' : undefined}>
-                        {`${branchLine} ${wt.isUsed ? '●' : '○'} ${wt.branch}  ${relativeTo(wt.path, repo.root)}${marks.length > 0 ? `  [${marks.join(' · ')}]` : ''}`}
-                      </Text>
-                    )
-                    if (!wt.isUsed) return row
+                    const isLast = index === repo.worktrees.length - 1
                     return (
-                      <Box flexDirection="row">
-                        {row}
-                        <Text>{'  '}</Text>
-                        <Button key={`open-${wt.path}`} label="VS Code 로 열기" onPress={() => openInVsCode($, wt.path)} />
+                      <Box flexDirection="column">
+                        <Box flexDirection="row">
+                          <Text bold color="success">{`${isLast ? '└─' : '├─'} ⎇ ${wt.branch}`}</Text>
+                          <Text dimColor>{`  [${relativeTo(wt.path, repo.root)}]  `}</Text>
+                          <Button key={`open-${wt.path}`} label="VS Code 로 열기" onPress={() => openInVsCode($, wt.path)} />
+                        </Box>
+                        {(wt.files ?? []).map(file => (
+                          <Text>{`${isLast ? '   ' : '│  '}   ${file}`}</Text>
+                        ))}
                       </Box>
                     )
                   })}

@@ -57,16 +57,14 @@ export type ActionEntry = {
 export type Worktree = {
   path: string
   branch: string
-  isMain: boolean
-  isUsed: boolean
-  isCwd: boolean
-  /** 사용 중인 워크트리만 센다. 그 밖은 null */
-  changes: number | null
+  /** 이 세션이 Edit·Write 로 바꾼 파일. 워크트리 기준 상대 경로, 처음 바꾼 순서 */
+  files: string[]
 }
 
 export type RepoView = { root: string; worktrees: Worktree[] }
 
-export type TreeView = { at: string; cwd: string; isCwdRepo: boolean; repos: RepoView[] }
+/** 이 세션이 파일을 바꾼 워크트리만 담는다 */
+export type TreeView = { at: string; repos: RepoView[] }
 
 export type IssueRef = {
   /** owner/repo#number */

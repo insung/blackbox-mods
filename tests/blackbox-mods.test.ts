@@ -504,27 +504,65 @@ for (const surface of ['terminal', 'desktop'] as const) {
 }
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`opens only used worktrees in VS Code on ${surface}`, async ($, on) => {
+  test(`shows only worktrees this session changed, with the changed files, on ${surface}`, async ($, on) => {
     const runs: string[][] = []
     on('session.cwd', async () => ({ value: '/r' }) as any)
     on('session.messages', async () => ({ value: [] }) as any)
     on('ui.toast', async () => ({ value: undefined }) as any)
+    on('tool.call', async () => ({ result: { stdout: '', stderr: '', interrupted: false } }) as any)
     on('process.run', async (_$: unknown, e: any) => {
       runs.push(e.argv)
       const argv: string[] = e.argv
+      // 폴더를 실제 경로로 바꾸는 sh 는 받은 폴더를 그대로 돌려준다
+      if (argv[0] === 'sh' && String(argv[2]).includes('pwd -P')) return { value: { exitCode: 0, stdout: `${argv[4]}\n`, stderr: '' } } as any
       if (argv[0] === 'git' && argv.includes('worktree')) {
-        return { value: { exitCode: 0, stdout: 'worktree /r\nHEAD 1\nbranch refs/heads/main\n\nworktree /r/.worktree/x\nHEAD 2\nbranch refs/heads/x\n', stderr: '' } } as any
+        if (!String(argv[2]).startsWith('/r')) return { value: { exitCode: 128, stdout: '', stderr: 'not a git repository' } } as any
+        return {
+          value: {
+            exitCode: 0,
+            stdout: 'worktree /r\nHEAD 1\nbranch refs/heads/main\n\nworktree /r/.worktree/x\nHEAD 2\nbranch refs/heads/x\n\nworktree /r/.worktree/y\nHEAD 3\nbranch refs/heads/y\n',
+            stderr: '',
+          },
+        } as any
       }
       return { value: { exitCode: 0, stdout: '', stderr: '' } } as any
     })
+    await ($.tool.call as any)({ tool: 'Write', file_path: '/r/.worktree/x/src/a.ts', content: '' } as any)
+    await ($.tool.call as any)({ tool: 'Edit', file_path: '/r/README.md', old_string: 'a', new_string: 'b' } as any)
+    await ($.tool.call as any)({ tool: 'Edit', file_path: '/r/.worktree/x/src/a.ts', old_string: 'a', new_string: 'b' } as any)
+    await ($.tool.call as any)({ tool: 'Read', file_path: '/s/notes.md' } as any)
     await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
     await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-tree', surface } as any)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(pane).toContain('open-/r')
-    expect(pane).not.toContain('open-/r/.worktree/x')
+    const at = (text: string) => pane.indexOf(text)
+    // 바꾼 워크트리만 처음 바꾼 순서로 보이고, 손대지 않은 워크트리와 읽기만 한 곳은 보이지 않는다
+    expect(pane).toContain('⎇ x')
+    expect(pane).toContain('⎇ main')
+    expect(pane).not.toContain('⎇ y')
+    expect(pane).not.toContain('/s')
+    expect(at('⎇ x')).toBeLessThan(at('⎇ main'))
+    expect(pane).toContain('  [.worktree/x]  ')
+    expect(pane).toContain('  [.]  ')
+    expect(pane.match(/src\/a\.ts/g)?.length).toBe(1)
+    expect(at('⎇ x')).toBeLessThan(at('src/a.ts'))
+    expect(at('⎇ main')).toBeLessThan(at('README.md'))
+    expect(pane).not.toContain('작업 디렉토리')
+    expect(pane).not.toContain('사용 중')
+    expect(pane).toContain('open-/r/.worktree/x')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'open-/r', surface } as any)
     const opened = runs.find(argv => argv[0] === 'sh' && String(argv[2]).includes('code'))
     expect(opened?.at(-1)).toBe('/r')
+  })
+
+  test(`says no worktree was changed before any edit on ${surface}`, async ($, on) => {
+    on('session.cwd', async () => ({ value: '/r' }) as any)
+    on('session.messages', async () => ({ value: [] }) as any)
+    on('process.run', async () => ({ value: { exitCode: 0, stdout: 'worktree /r\nHEAD 1\nbranch refs/heads/main\n', stderr: '' } }) as any)
+    await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-tree', surface } as any)
+    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(pane).toContain('이 세션에서 파일을 바꾼 워크트리가 없다.')
+    expect(pane).not.toContain('open-/r')
   })
 }
 
