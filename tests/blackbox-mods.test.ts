@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { ActionEntry, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
+import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords, purposeGroups, purposeResult } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; actions: ActionEntry[] } = { runs: [], actions: [] }
@@ -11,6 +11,15 @@ function watch(on: any) {
     return next(e)
   })
   return seen
+}
+
+/** 세션 로그의 목적 묶음을 모두 펼친 뒤 다시 그린 패널 */
+async function expandLog($: any, surface: string): Promise<string> {
+  const render = async () => JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface }))
+  for (const match of (await render()).matchAll(/"key":"(purpose-[^"]+)"/g)) {
+    await $.ui.press({ plugin: 'blackbox-mods', key: match[1], surface })
+  }
+  return render()
 }
 
 function answerTools(on: any, stdout = '') {
@@ -82,7 +91,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`draws the log tab and switches to the tree tab on ${surface}`, async ($, on) => {
     answerTools(on, '| a |\n|---|\n| 1 |')
     await ($.tool.call as any)({ tool: 'Bash', description: 'g', command: `python3 run_query.py -D web_mihd "SELECT a FROM t"` } as any)
-    const log = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    const log = await expandLog($, surface)
     expect(log).toContain('SELECT a FROM t')
     expect(log).toContain('▶ 세션 로그')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-tree', surface } as any)
@@ -180,10 +189,18 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(pane).toContain('⎇ 머지됨')
     expect(pane).toContain('#35')
     expect(pane).toContain('https://github.com/o/dmp.crawler/pull/35')
-    expect(pane).toContain('docs/o-rk-a-rk-reverse-engineering')
-    expect(pane).toContain('+4,079')
-    expect(pane).toContain('−761')
-    expect(pane).toContain('○ CI')
+    // PR 도 번호 옆에 제목을 두고, 디프 수치와 CI 는 보이지 않는다
+    expect(pane.indexOf('#35')).toBeLessThan(pane.indexOf('역공학 문서'))
+    expect(pane).not.toContain('+4,079')
+    expect(pane).not.toContain('−761')
+    expect(pane).not.toContain('○ CI')
+    // 커밋은 브랜치 이름 머리줄 아래에 묶인다
+    expect(pane.indexOf('역공학 문서')).toBeLessThan(pane.indexOf('docs/o-rk-a-rk-reverse-engineering'))
+    expect(pane.indexOf('docs/o-rk-a-rk-reverse-engineering')).toBeLessThan(pane.indexOf('5d6e7f8'))
+    expect(pane.indexOf('제목 9')).toBeLessThan(pane.indexOf('fix/9'))
+    expect(pane.indexOf('fix/9')).toBeLessThan(pane.indexOf('1a2b3c4'))
+    // 번호는 링크 색으로 보인다
+    expect(pane).toContain('"color":"suggestion"')
     expect(pane).toContain('✓ 완료')
     expect(pane).toContain('제목 9')
   })
@@ -375,8 +392,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(at('9a8b7c6')).toBeLessThan(at('참고한 이슈·PR  2건'))
     expect(at('참고한 이슈·PR')).toBeLessThan(at('제목 o/r#28'))
     expect(at('참고한 이슈·PR')).toBeLessThan(at('제목 p/q#27'))
-    expect(pane).toContain('사용자 프롬프트')
-    // 참고 줄에는 gh 명령 이름과 명령 결과를 보이지 않는다
+    // 참고 줄에는 출처(사용자 프롬프트·Claude 답변), gh 명령 이름, 명령 결과를 보이지 않는다
+    expect(pane).not.toContain('사용자 프롬프트')
     expect(pane).not.toContain('gh pr view')
     expect(pane).not.toContain('명령 결과')
     // 참고 머리줄 위에 가로 구분선을 두지 않는다 (좁은 창에서 다음 줄로 넘어간다)
@@ -496,27 +513,65 @@ for (const surface of ['terminal', 'desktop'] as const) {
 }
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`opens only used worktrees in VS Code on ${surface}`, async ($, on) => {
+  test(`shows only worktrees this session changed, with the changed files, on ${surface}`, async ($, on) => {
     const runs: string[][] = []
     on('session.cwd', async () => ({ value: '/r' }) as any)
     on('session.messages', async () => ({ value: [] }) as any)
     on('ui.toast', async () => ({ value: undefined }) as any)
+    on('tool.call', async () => ({ result: { stdout: '', stderr: '', interrupted: false } }) as any)
     on('process.run', async (_$: unknown, e: any) => {
       runs.push(e.argv)
       const argv: string[] = e.argv
+      // 폴더를 실제 경로로 바꾸는 sh 는 받은 폴더를 그대로 돌려준다
+      if (argv[0] === 'sh' && String(argv[2]).includes('pwd -P')) return { value: { exitCode: 0, stdout: `${argv[4]}\n`, stderr: '' } } as any
       if (argv[0] === 'git' && argv.includes('worktree')) {
-        return { value: { exitCode: 0, stdout: 'worktree /r\nHEAD 1\nbranch refs/heads/main\n\nworktree /r/.worktree/x\nHEAD 2\nbranch refs/heads/x\n', stderr: '' } } as any
+        if (!String(argv[2]).startsWith('/r')) return { value: { exitCode: 128, stdout: '', stderr: 'not a git repository' } } as any
+        return {
+          value: {
+            exitCode: 0,
+            stdout: 'worktree /r\nHEAD 1\nbranch refs/heads/main\n\nworktree /r/.worktree/x\nHEAD 2\nbranch refs/heads/x\n\nworktree /r/.worktree/y\nHEAD 3\nbranch refs/heads/y\n',
+            stderr: '',
+          },
+        } as any
       }
       return { value: { exitCode: 0, stdout: '', stderr: '' } } as any
     })
+    await ($.tool.call as any)({ tool: 'Write', file_path: '/r/.worktree/x/src/a.ts', content: '' } as any)
+    await ($.tool.call as any)({ tool: 'Edit', file_path: '/r/README.md', old_string: 'a', new_string: 'b' } as any)
+    await ($.tool.call as any)({ tool: 'Edit', file_path: '/r/.worktree/x/src/a.ts', old_string: 'a', new_string: 'b' } as any)
+    await ($.tool.call as any)({ tool: 'Read', file_path: '/s/notes.md' } as any)
     await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
     await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-tree', surface } as any)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(pane).toContain('open-/r')
-    expect(pane).not.toContain('open-/r/.worktree/x')
+    const at = (text: string) => pane.indexOf(text)
+    // 바꾼 워크트리만 처음 바꾼 순서로 보이고, 손대지 않은 워크트리와 읽기만 한 곳은 보이지 않는다
+    expect(pane).toContain('⎇ x')
+    expect(pane).toContain('⎇ main')
+    expect(pane).not.toContain('⎇ y')
+    expect(pane).not.toContain('/s')
+    expect(at('⎇ x')).toBeLessThan(at('⎇ main'))
+    expect(pane).toContain('  [.worktree/x]  ')
+    expect(pane).toContain('  [.]  ')
+    expect(pane.match(/src\/a\.ts/g)?.length).toBe(1)
+    expect(at('⎇ x')).toBeLessThan(at('src/a.ts'))
+    expect(at('⎇ main')).toBeLessThan(at('README.md'))
+    expect(pane).not.toContain('작업 디렉토리')
+    expect(pane).not.toContain('사용 중')
+    expect(pane).toContain('open-/r/.worktree/x')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'open-/r', surface } as any)
     const opened = runs.find(argv => argv[0] === 'sh' && String(argv[2]).includes('code'))
     expect(opened?.at(-1)).toBe('/r')
+  })
+
+  test(`says no worktree was changed before any edit on ${surface}`, async ($, on) => {
+    on('session.cwd', async () => ({ value: '/r' }) as any)
+    on('session.messages', async () => ({ value: [] }) as any)
+    on('process.run', async () => ({ value: { exitCode: 0, stdout: 'worktree /r\nHEAD 1\nbranch refs/heads/main\n', stderr: '' } }) as any)
+    await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-tree', surface } as any)
+    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(pane).toContain('이 세션에서 파일을 바꾼 워크트리가 없다.')
+    expect(pane).not.toContain('open-/r')
   })
 }
 
@@ -546,22 +601,34 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__note_reads', purpose: '배치 문서 확인', result: '기준일이 -2일로 바뀌었다' } as any)
     await ($.tool.call as any)({ tool: 'Bash', description: '배치 폴더 확인', command: 'ls batch' } as any)
     await ($.tool.call as any)({ tool: 'Edit', file_path: '/Users/b/mi/a.py', old_string: 'x', new_string: 'y' } as any)
-    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(pane).toContain('{"type":"Markdown","props":{"text":"## 카카오톡 DAU 조회"}}')
-    expect(pane.match(/"\[[^"\]]+\]"/g)?.length).toBe(1)
-    expect(pane).not.toMatch(/── \[/)
-    expect(pane).toContain('"children":["▌ 명령"]')
-    expect(pane).toContain('- **목적:** 배치 폴더 확인\\n- **실행:**\\n  ```bash\\n  ls batch\\n  ```\\n- **결과:**\\n  ```text\\n  | a |\\n  |---|\\n  | 1 |\\n  ```')
-    expect(pane).toContain('▌ 명령')
-    expect(pane).toContain('▌ 파일 수정')
-    expect(pane).toContain('  /Users/b/mi/a.py')
-    expect(pane).toContain('▌ 쿼리')
-    expect(pane).toContain('▌ 파일 읽기')
+    // 접힌 상태: 목적 머리줄과 ⇒ 결과만 보인다
+    const folded = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(folded).toContain('{"type":"Markdown","props":{"text":"## 카카오톡 DAU 조회"}}')
+    expect(folded.match(/"\[[^"\]]+\]"/g)?.length).toBe(1)
+    expect(folded).toContain('▸ 날짜별 OS별 사용자수')
+    expect(folded).toContain('▸ 배치 문서 확인')
+    expect(folded).toContain('  ⇒ 기준일이 -2일로 바뀌었다')
+    expect(folded).toContain('▸ 배치 폴더 확인')
+    expect(folded).toContain('  ⇒ 실행 1건 모두 성공')
+    expect(folded).not.toContain('ls batch')
+    expect(folded).not.toContain('건수')
+    expect(folded).not.toContain('▌')
+    // 펼친 상태: 목적은 머리줄에만 있고, 기록은 공백으로 들여쓴다
+    const pane = await expandLog($, surface)
+    expect(pane).toContain('▾ 배치 폴더 확인')
+    expect(pane).toContain('"paddingLeft":4')
+    expect(pane).not.toContain('- **목적:**')
+    expect(pane).toContain('- **실행:**\\n  ```bash\\n  ls batch\\n  ```\\n- **결과:**\\n  ```text\\n  | a |\\n  |---|\\n  | 1 |\\n  ```')
+    expect(pane).toContain('- **수정:** /Users/b/mi/a.py')
+    expect(pane.indexOf('▾ 배치 폴더 확인')).toBeLessThan(pane.indexOf('/Users/b/mi/a.py'))
     expect(pane).not.toContain('run_query.py')
-    expect(pane).toContain('- **목적:** 날짜별 OS별 사용자수\\n- **대상:** DB web\\\\_mihd · 테이블 t\\n- **실행:**\\n  ```sql')
+    expect(pane).toContain('- **대상:** DB web\\\\_mihd · 테이블 t\\n- **실행:**\\n  ```sql')
     expect(pane).toContain('SELECT a FROM t')
-    expect(pane).toContain('- **목적:** 배치 문서 확인\\n- **읽은 파일:**\\n  - /Users/b/mi/.worktree/x/README.md\\n- **결과:** 기준일이 -2일로 바뀌었다')
+    expect(pane).toContain('- **읽은 파일:**\\n  - /Users/b/mi/.worktree/x/README.md\\n- **결과:** 기준일이 -2일로 바뀌었다')
     expect(pane).not.toContain('결정 대기')
+    // 다시 누르면 접힌다
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'purpose-turn-1-2', surface } as any)
+    expect(JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))).not.toContain('ls batch')
   })
 }
 
@@ -690,30 +757,31 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'Bash', description: '첫 명령', command: 'ls one' } as any)
     await $.prompt.submit({ text: '둘째 요청' } as any).catch(() => undefined)
     await ($.tool.call as any)({ tool: 'Bash', description: '둘째 명령', command: 'ls two' } as any)
+    // 목적 묶음은 접혀 있어 머리줄의 목적으로 요청 묶음을 가린다
     let pane = await render()
     expect(pane).toContain('  2 / 2  ')
-    expect(pane).toContain('ls two')
-    expect(pane).not.toContain('ls one')
+    expect(pane).toContain('▸ 둘째 명령')
+    expect(pane).not.toContain('첫 명령')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'log-prev', surface } as any)
     pane = await render()
     expect(pane).toContain('  1 / 2  ')
-    expect(pane).toContain('ls one')
-    expect(pane).not.toContain('ls two')
+    expect(pane).toContain('▸ 첫 명령')
+    expect(pane).not.toContain('둘째 명령')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'log-prev', surface } as any)
     expect(await render()).toContain('  1 / 2  ')
     await $.prompt.submit({ text: '셋째 요청' } as any).catch(() => undefined)
     await ($.tool.call as any)({ tool: 'Bash', description: '셋째 명령', command: 'ls three' } as any)
     pane = await render()
     expect(pane).toContain('  1 / 3  ')
-    expect(pane).toContain('ls one')
+    expect(pane).toContain('첫 명령')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'log-next', surface } as any)
     await $.ui.press({ plugin: 'blackbox-mods', key: 'log-next', surface } as any)
-    expect(await render()).toContain('ls three')
+    expect(await render()).toContain('셋째 명령')
     await $.prompt.submit({ text: '넷째 요청' } as any).catch(() => undefined)
     await ($.tool.call as any)({ tool: 'Bash', description: '넷째 명령', command: 'ls four' } as any)
     pane = await render()
     expect(pane).toContain('  4 / 4  ')
-    expect(pane).toContain('ls four')
+    expect(pane).toContain('넷째 명령')
   })
 }
 
@@ -731,9 +799,45 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('process.run', async () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }) as any)
     on('session.cwd', async () => ({ value: '/tmp' }) as any)
     await ($.tool.call as any)({ tool: 'Bash', description: '색 출력', command: 'ls --color' } as any)
-    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(pane).toContain('▌ 명령')
+    const pane = await expandLog($, surface)
+    expect(pane).toContain('▾ 색 출력')
     expect(pane).toContain('- **결과:**\\n  ```text\\n  red\\n  ok\\n  ```')
+  })
+}
+
+test('groups records by purpose, putting records without one under the purpose before them', async () => {
+  const groups = purposeGroups(['', 'a', '', 'a', 'b', '', 'c'], one => one, '요청 요약')
+  expect(groups.map(g => [g.purpose, g.items.length])).toEqual([['요청 요약', 1], ['a', 3], ['b', 2], ['c', 1]])
+  expect(purposeGroups([], one => String(one), 'x')).toEqual([])
+})
+
+test('sums a purpose result from read conclusions, else from command status', async () => {
+  expect(purposeResult([{ kind: 'command', status: 'done' }, { kind: 'read', result: '결론' }]).text).toBe('결론')
+  expect(purposeResult([{ kind: 'command', status: 'done' }, { kind: 'run', status: 'done' }, { kind: 'file', status: 'done' }])).toEqual({ text: '실행 2건 모두 성공', color: 'success' })
+  expect(purposeResult([{ kind: 'command', status: 'done' }, { kind: 'command', status: 'denied' }])).toEqual({ text: '실행 2건 중 1건 실패', color: 'error' })
+  expect(purposeResult([{ kind: 'file', status: 'done' }]).text).toBe('파일 1개 작성·수정')
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`puts a sub-agent's records under its Agent description on ${surface}`, async ($, on) => {
+    answerTools(on)
+    on('model.complete', async () => ({ value: { isAnswered: true, text: '카드 엔진 구현', usage: {} } }) as any)
+    on('prompt.submit', async (_$: unknown, e: any) => ({ text: e.text }) as any)
+    await $.prompt.submit({ text: '카드 엔진을 구현해줘' } as any).catch(() => undefined)
+    await ($.tool.call as any)({ tool: 'Bash', description: '이슈 본문 확인', command: 'gh issue view 4' } as any)
+    // Agent 호출이 먼저 기록되고, 뒤따르는 description 없는 하위 에이전트 기록은 그 아래에 묶인다
+    await ($.tool.call as any)({ tool: 'Agent', description: '카드 엔진 1~3단계 구현', subagent_type: 'general-purpose', prompt: '…' } as any)
+    await ($.tool.call as any)({ tool: 'Bash', command: 'git status' } as any)
+    await ($.tool.call as any)({ tool: 'Write', file_path: '/tmp/engine.py', content: '' } as any)
+    const folded = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(folded).toContain('▸ 이슈 본문 확인')
+    expect(folded).toContain('▸ 카드 엔진 1~3단계 구현')
+    expect(folded).not.toContain('목적 없음')
+    expect(folded).not.toContain('설명 없음')
+    const pane = await expandLog($, surface)
+    expect(pane.indexOf('▾ 카드 엔진 1~3단계 구현')).toBeLessThan(pane.indexOf('git status'))
+    expect(pane.indexOf('git status')).toBeLessThan(pane.indexOf('/tmp/engine.py'))
+    expect(pane).toContain('하위 에이전트에게 맡김 (general-purpose)')
   })
 }
 
@@ -1097,15 +1201,16 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'Bash', description: '마지막 적재 시각 확인', command: 'ls load' } as any)
     await ($.tool.call as any)({ tool: 'Bash', description: '배치 로그 확인', command: 'ls batch' } as any)
     await ($.tool.call as any)({ tool: 'Edit', file_path: '/tmp/fix.py', old_string: 'a', new_string: 'b' } as any)
-    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    const pane = await expandLog($, surface)
     const at = (text: string) => pane.indexOf(text)
     expect(at('## 실시간 순위 장애 대응')).toBeLessThan(at('마지막 적재 시각 확인'))
     expect(at('마지막 적재 시각 확인')).toBeLessThan(at('배치 로그 확인'))
-    expect(at('배치 로그 확인')).toBeLessThan(at('▌ 파일 수정'))
-    expect(pane.match(/"▌ 명령"/g)?.length).toBe(2)
+    // 목적 없는 파일 수정은 바로 앞 목적 묶음에 들어간다
+    expect(at('▾ 배치 로그 확인')).toBeLessThan(at('/tmp/fix.py'))
+    expect(pane.match(/"key":"purpose-/g)?.length).toBe(2)
+    expect(pane).not.toContain('▌')
     expect(pane).not.toContain('작업 계획')
     expect(pane).not.toContain('단계 밖')
-    expect(pane).not.toContain('▸')
   })
 }
 
