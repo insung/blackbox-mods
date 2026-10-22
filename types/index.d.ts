@@ -42,10 +42,11 @@ export type ActionEntry = {
   t: number
   at: string
   turn: number
-  kind: 'command' | 'file'
-  /** command: 실행한 명령, file: 파일 경로 */
+  /** agent: 하위 에이전트에게 일을 맡긴 Agent 호출. 뒤따르는 하위 에이전트 기록의 목적이 된다 */
+  kind: 'command' | 'file' | 'agent'
+  /** command: 실행한 명령, file: 파일 경로, agent: 하위 에이전트 종류 */
   target: string
-  /** command: Bash description, file: 수정·작성 */
+  /** command: Bash description, file: 수정·작성, agent: Agent description */
   note: string
   status: 'done' | 'failed' | 'denied'
   /** command: 출력 앞부분 (실패면 오류 글, 거부면 거부 이유). file: 빈 값 */
@@ -57,16 +58,14 @@ export type ActionEntry = {
 export type Worktree = {
   path: string
   branch: string
-  isMain: boolean
-  isUsed: boolean
-  isCwd: boolean
-  /** 사용 중인 워크트리만 센다. 그 밖은 null */
-  changes: number | null
+  /** 이 세션이 Edit·Write 로 바꾼 파일. 워크트리 기준 상대 경로, 처음 바꾼 순서 */
+  files: string[]
 }
 
 export type RepoView = { root: string; worktrees: Worktree[] }
 
-export type TreeView = { at: string; cwd: string; isCwdRepo: boolean; repos: RepoView[] }
+/** 이 세션이 파일을 바꾼 워크트리만 담는다 */
+export type TreeView = { at: string; repos: RepoView[] }
 
 export type IssueRef = {
   /** owner/repo#number */
@@ -268,6 +267,8 @@ declare module 'claude-code' {
       /** 암묵적 합의 탭에서 한 번에 답하려고 고른 항목 id */
       pickedAgreements: string[]
       notes: Note[]
+      /** 세션 로그에서 펼친 목적 묶음의 버튼 키 */
+      openPurposes: string[]
       lastPrompt: string
     }
   }

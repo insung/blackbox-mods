@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { ActionEntry, Agreement, Decision, Note, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn, Worktree } from '../types'
+import type { ActionEntry, Agreement, Decision, Note, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn } from '../types'
 
 const LOG_PANE = 'blackbox-mods'
 const TABS: { id: TabId; label: string }[] = [
@@ -20,7 +20,8 @@ const AGREEMENT_TOOL = 'track_agreements'
 const QUERY_COMMAND = /run_query\.py|(^|[\s;&|])mysql\s/
 const OUTPUT_LINES = 30
 /** 세션 로그 항목 머리의 색: 종류마다 다르게 해 항목끼리 구분한다 */
-const KIND_COLOR = { read: 'suggestion', file: 'success', command: 'bashBorder', query: 'permission' } as const
+/** Git 탭의 이슈·PR 번호 색. Link 에는 색 속성이 없어 감싼 Text 로 칠한다 */
+const LINK_COLOR = 'suggestion'
 const AGREEMENT_KINDS = ['premise', 'scope', 'term', 'method', 'reading', 'format'] as const
 const AGREEMENT_KIND_LABEL: Record<Agreement['kind'], string> = {
   premise: '진행 전제',
@@ -81,6 +82,8 @@ const decisions = atom({ plugin: 'blackbox-mods', key: 'decisions' } as const, [
 const agreements = atom({ plugin: 'blackbox-mods', key: 'agreements' } as const, [] as Agreement[])
 const pickedAgreements = atom({ plugin: 'blackbox-mods', key: 'pickedAgreements' } as const, [] as string[])
 const notes = atom({ plugin: 'blackbox-mods', key: 'notes' } as const, [] as Note[])
+/** 세션 로그에서 펼친 목적 묶음의 버튼 키 */
+const openPurposes = atom({ plugin: 'blackbox-mods', key: 'openPurposes' } as const, [] as string[])
 const lastPrompt = atom({ plugin: 'blackbox-mods', key: 'lastPrompt' } as const, '')
 const tab = atom({ plugin: 'blackbox-mods', key: 'tab' } as const, 'log' as TabId)
 const logPage = atom({ plugin: 'blackbox-mods', key: 'logPage' } as const, '')
@@ -534,6 +537,17 @@ export function groupByRepo(refs: readonly IssueRef[]): { repo: string; refs: Is
   return [...groups].map(([repo, list]) => ({ repo, refs: list }))
 }
 
+/** 커밋을 브랜치별로 묶는다. 브랜치와 커밋은 입력 순서를 그대로 쓰고, 브랜치를 모르는 커밋은 '' 묶음 */
+export function groupByBranch(list: readonly SessionCommit[]): { branch: string; commits: SessionCommit[] }[] {
+  const groups = new Map<string, SessionCommit[]>()
+  for (const one of list) {
+    const commits = groups.get(one.branch) ?? []
+    commits.push(one)
+    groups.set(one.branch, commits)
+  }
+  return [...groups].map(([branch, commits]) => ({ branch, commits }))
+}
+
 /** 커밋을 이슈·PR 에 잇는다: 같은 저장소에서 메시지의 번호, 다음으로 PR head 브랜치. 저장소를 모르거나 잇지 못한 커밋은 unlinked */
 export function linkCommits(
   list: SessionCommit[],
@@ -973,13 +987,6 @@ export function stateBadge(meta: IssueMeta | undefined, isPull: boolean): { text
   return { text: '✓ 완료', color: 'merged' }
 }
 
-const CI_BADGE: Record<'pass' | 'fail' | 'pending' | 'none', { text: string; color: string | undefined }> = {
-  pass: { text: '✓ CI', color: 'success' },
-  fail: { text: '✗ CI', color: 'error' },
-  pending: { text: '○ CI', color: 'warning' },
-  none: { text: '○ CI', color: 'subtle' },
-}
-
 async function refreshIssues($: EngineInterface): Promise<void> {
   const messages = await $.session.messages()
   const list = collectIssues(Array.isArray(messages) ? messages : [])
@@ -1133,44 +1140,40 @@ async function rememberPlace($: EngineInterface, dir: string | undefined): Promi
   return true
 }
 
-async function repoRootOf($: EngineInterface, dir: string): Promise<string | undefined> {
-  const listed = await $.process.run(['git', '-C', dir, 'worktree', 'list', '--porcelain'])
-  if (listed.exitCode !== 0) return undefined
-  return parseWorktrees(listed.stdout)[0]?.path
+/** 폴더를 품은 워크트리 중 가장 안쪽 것. 메인 체크아웃 안에 둔 워크트리(.worktree/…)를 메인과 가른다 */
+export function worktreeOf<T extends { path: string }>(dir: string, entries: readonly T[]): T | undefined {
+  return entries.filter(entry => isInside(dir, entry.path)).sort((x, y) => y.path.length - x.path.length)[0]
 }
 
+/** 이 세션이 Edit·Write 로 바꾼 파일을 워크트리별로 묶는다. 파일을 바꾼 워크트리만 남기고, 저장소·워크트리·파일은 처음 바꾼 순서를 쓴다 */
 async function refreshTree($: EngineInterface): Promise<void> {
   const cwd = await $.session.cwd()
-  const used = [...new Set([cwd, ...(await read($, places))])]
-  const roots: string[] = []
-  for (const dir of used) {
-    const root = await repoRootOf($, dir).catch(() => undefined)
-    if (root && !roots.includes(root)) roots.push(root)
-  }
+  const files = [...new Set((await read($, actions)).filter(one => one.kind === 'file' && one.status === 'done').map(one => one.target))]
   const repos: RepoView[] = []
-  for (const root of roots) {
-    const listed = await $.process.run(['git', '-C', root, 'worktree', 'list', '--porcelain'])
-    const entries = parseWorktrees(listed.stdout)
-    const worktrees: Worktree[] = []
-    for (const [index, entry] of entries.entries()) {
-      const nested = entries.filter(other => other.path !== entry.path && isInside(other.path, entry.path))
-      const owns = (dir: string) => isInside(dir, entry.path) && !nested.some(other => isInside(dir, other.path))
-      const isUsed = used.some(owns)
-      const status = isUsed
-        ? await $.process.run(['git', '-C', entry.path, 'status', '--porcelain']).catch(() => undefined)
-        : undefined
-      worktrees.push({
-        path: entry.path,
-        branch: entry.branch || '(branch 없음)',
-        isMain: index === 0,
-        isUsed,
-        isCwd: owns(cwd),
-        changes: status && status.exitCode === 0 ? status.stdout.split('\n').filter(Boolean).length : null,
-      })
+  const listedOf = new Map<string, { path: string; branch: string }[]>()
+  for (const file of files) {
+    const dir = await resolveDir($, dirOf(file), cwd).catch(() => undefined)
+    if (!dir) continue
+    const listed = await $.process.run(['git', '-C', dir, 'worktree', 'list', '--porcelain']).catch(() => undefined)
+    const entries = listed && listed.exitCode === 0 ? parseWorktrees(listed.stdout) : []
+    const root = entries[0]?.path
+    const entry = worktreeOf(dir, entries)
+    if (!root || !entry) continue
+    if (!listedOf.has(root)) listedOf.set(root, entries)
+    let repo = repos.find(one => one.root === root)
+    if (!repo) {
+      repo = { root, worktrees: [] }
+      repos.push(repo)
     }
-    repos.push({ root, worktrees })
+    let wt = repo.worktrees.find(one => one.path === entry.path)
+    if (!wt) {
+      wt = { path: entry.path, branch: entry.branch || '(branch 없음)', files: [] }
+      repo.worktrees.push(wt)
+    }
+    const path = relativeTo(`${dir}/${file.slice(file.lastIndexOf('/') + 1)}`, entry.path)
+    if (!wt.files.includes(path)) wt.files.push(path)
   }
-  await update($, tree, () => ({ at: timeNow(), cwd, isCwdRepo: roots.some(root => isInside(cwd, root)), repos }))
+  await update($, tree, () => ({ at: timeNow(), repos }))
 }
 
 /** VS Code 로 폴더를 연다. code 명령이 없으면 macOS 의 open 으로 앱을 부른다 */
@@ -1315,7 +1318,7 @@ async function noteTool($: EngineInterface, e: { tool: string } & Record<string,
     const dir = await resolveDir($, target, cwd).catch(() => undefined)
     if (await rememberPlace($, dir)) isNew = true
   }
-  if (isNew || e.tool === 'Bash') await refreshTree($)
+  if (isNew || e.tool !== 'Read') await refreshTree($)
 }
 
 const COMMAND_WIDTH = 120
@@ -1413,6 +1416,48 @@ async function recordAction($: EngineInterface, e: { tool: string } & Record<str
   await update($, actions, list => [...list, entry].slice(-200))
 }
 
+/** 하위 에이전트를 부르기 전에 Agent 호출을 기록한다. 하위 에이전트의 기록이 이 뒤에 쌓여 이 description 을 목적으로 삼는다 */
+async function recordAgent($: EngineInterface, e: Record<string, unknown>) {
+  const note = typeof e.description === 'string' ? e.description.trim() : ''
+  if (!note) return
+  const target = typeof e.subagent_type === 'string' ? e.subagent_type : ''
+  const turn = await currentTurn($)
+  const id = typeof e.tool_use_id === 'string' ? e.tool_use_id : `g${Date.now()}`
+  const entry: ActionEntry = { id, kind: 'agent', target, note, status: 'done', output: '', outputLines: 0, t: Date.now(), at: timeNow(), turn }
+  await update($, actions, list => [...list, entry].slice(-200))
+}
+
+/** 목적 없는 기록의 자리표: 쿼리 기록은 description 이 없으면 이 글을 목표로 둔다 */
+const NO_GOAL = '(목표 설명 없음)'
+
+/**
+ * 요청 묶음 안의 기록을 목적별로 묶는다. 같은 목적이 연이은 기록이 한 묶음이다.
+ * 목적 없는 기록은 바로 앞 목적에 넣고, 맨 앞이면 fallback(요청 요약)을 목적으로 쓴다
+ */
+export function purposeGroups<T>(items: readonly T[], purposeOf: (item: T) => string, fallback: string): { purpose: string; items: T[] }[] {
+  const groups: { purpose: string; items: T[] }[] = []
+  for (const item of items) {
+    const own = purposeOf(item).trim()
+    const last = groups.at(-1)
+    if (last && (!own || own === last.purpose)) last.items.push(item)
+    else groups.push({ purpose: own || fallback, items: [item] })
+  }
+  return groups
+}
+
+/** 목적 묶음의 결과 한 줄: 읽은 파일 결론이 있으면 그 결론, 없으면 실행 성공·실패 요약 */
+export function purposeResult(parts: readonly { kind: 'read' | 'command' | 'file' | 'agent' | 'run'; status?: string; result?: string }[]): { text: string; color: string | undefined } {
+  const results = parts.filter(one => one.kind === 'read' && one.result).map(one => one.result ?? '')
+  if (results.length > 0) return { text: results.join(' / '), color: undefined }
+  const ran = parts.filter(one => (one.kind === 'command' || one.kind === 'run') && one.status !== 'running')
+  const failed = ran.filter(one => one.status === 'failed' || one.status === 'denied').length
+  if (failed > 0) return { text: `실행 ${ran.length}건 중 ${failed}건 실패`, color: 'error' }
+  if (ran.length > 0) return { text: `실행 ${ran.length}건 모두 성공`, color: 'success' }
+  const files = parts.filter(one => one.kind === 'file').length
+  if (files > 0) return { text: `파일 ${files}개 작성·수정`, color: 'success' }
+  return { text: '아직 결과 없음', color: 'subtle' }
+}
+
 async function record($: EngineInterface, e: { command: string; description?: string; tool_use_id: string }): Promise<QueryRun> {
   let sql = sqlOf(e.command)
   const file = e.command.match(/--file[\s=]+(\S+)/)?.[1]
@@ -1428,7 +1473,7 @@ async function record($: EngineInterface, e: { command: string; description?: st
     turn,
     t: Date.now(),
     at: timeNow(),
-    goal: e.description?.trim() || '(목표 설명 없음)',
+    goal: e.description?.trim() || NO_GOAL,
     purpose: purposeOf(sql),
     database: databaseOf(e.command),
     tables: tablesOf(sql),
@@ -1691,6 +1736,7 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', async ($, e, next) => {
+    if (e.tool === 'Agent') await recordAgent($, e as unknown as Record<string, unknown>).catch(() => undefined)
     const ran = await next(e)
     if (e.tool === 'Read' && ran.deny === undefined && !ran.isError) {
       const file = (e as unknown as { file_path?: unknown }).file_path
@@ -1711,12 +1757,16 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button, Code, Markdown, Link } = elements
     /** 입력란이 없는 표면(모바일)에서는 노트를 읽기 전용 글로 보인다 */
     const Input = e.surface !== 'mobile' && 'Input' in elements ? elements.Input : undefined
-    /** 데스크톱 앱에서는 이슈·PR 번호를 누르면 내장 브라우저에서 열고, 다른 표면에서는 링크로 둔다 */
+    /** 데스크톱 앱에서는 이슈·PR 번호를 누르면 내장 브라우저에서 열고, 다른 표면에서는 링크로 둔다. 번호는 링크 색으로 보인다 */
     const issueLink = (url: string, label: string) =>
       e.surface === 'desktop' ? (
-        <Button key={`issue-${url}`} label={label} plain onPress={() => void openInBrowser($, url)} />
+        <Button key={`issue-${url}`} plain onPress={() => void openInBrowser($, url)}>
+          <Text color={LINK_COLOR}>{label}</Text>
+        </Button>
       ) : (
-        <Link href={url} label={label} />
+        <Text color={LINK_COLOR}>
+          <Link href={url} label={label} />
+        </Text>
       )
     const current = await read($, tab)
     const turnList = await read($, turns)
@@ -1795,6 +1845,14 @@ export const register: Register = (on, options) => {
           <Text>{` ${cut(one.subject, 70)}`}</Text>
         </Box>
       ))
+    /** 커밋을 브랜치 이름 머리줄 아래에 묶는다 */
+    const branchRows = (list: SessionCommit[], lead: string) =>
+      groupByBranch(list).map((group, n, all) => (
+        <Box flexDirection="column">
+          <Text dimColor>{`${lead}${n === all.length - 1 ? '└─' : '├─'} ${group.branch || '(브랜치 모름)'}`}</Text>
+          {commitRows(group.commits, `${lead}     `)}
+        </Box>
+      ))
     const hits = await read($, skillHits)
     const skillAt = await read($, skillsAt)
     const cut = (text: string, size: number) => (text.length > size ? `${text.slice(0, size)}…` : text)
@@ -1805,23 +1863,28 @@ export const register: Register = (on, options) => {
       </Box>
     )
     type LogItem = (typeof entries)[number]
-    /** 기록 머리: 종류를 색 있는 ▌ 줄로 보인다 */
-    const head = (name: string, color: string) => (
-      <Box flexDirection="row" marginTop={1}>
-        <Text bold color={color}>{`▌ ${name}`}</Text>
-      </Box>
-    )
+    /** 기록 하나의 목적. 파일 수정에는 목적이 없어 앞 목적을 따른다 */
+    const itemPurpose = (item: LogItem) => {
+      if (item.kind === 'read') return item.entry.purpose
+      if (item.kind === 'run') return item.run.purpose || (item.run.goal === NO_GOAL ? '' : item.run.goal)
+      return item.action.kind === 'file' ? '' : item.action.note
+    }
+    const itemPart = (item: LogItem) =>
+      item.kind === 'read'
+        ? { kind: 'read' as const, result: item.entry.result }
+        : item.kind === 'run'
+          ? { kind: 'run' as const, status: item.run.status }
+          : { kind: item.action.kind, status: item.action.status }
+    /** 펼친 목적 묶음 안의 기록 하나. 목적은 묶음 머리줄에 있어 다시 쓰지 않는다 */
     const entryView = (item: LogItem) => {
       if (item.kind === 'read') {
         const entry = item.entry
         const text = [
-          mdField('목적', entry.purpose || '(Claude 가 아직 정리하지 않음)'),
           ...(entry.files.length > 0 ? ['- **읽은 파일:**', ...entry.files.map(file => `  - ${mdInline(file)}`)] : []),
           mdField('결과', entry.result || '(Claude 가 아직 정리하지 않음)'),
         ].join('\n')
         return (
-          <Box flexDirection="column">
-            {head('파일 읽기', KIND_COLOR.read)}
+          <Box flexDirection="column" marginTop={1}>
             <Markdown text={text} />
           </Box>
         )
@@ -1829,25 +1892,21 @@ export const register: Register = (on, options) => {
       if (item.kind === 'action') {
         const action = item.action
         const mark = action.status === 'failed' ? ' (실패)' : action.status === 'denied' ? ' (거부됨)' : ''
+        if (action.kind === 'agent') {
+          return <Text dimColor>{`- 하위 에이전트에게 맡김${action.target ? ` (${action.target})` : ''}`}</Text>
+        }
         if (action.kind === 'file') {
-          return (
-            <Box flexDirection="column">
-              {head(`파일 ${action.note}`, KIND_COLOR.file)}
-              <Text color={KIND_COLOR.file}>{`  ${action.target}`}</Text>
-            </Box>
-          )
+          return <Markdown text={mdField(action.note, action.target)} />
         }
         const output = action.output ?? ''
         const text = [
-          mdField('목적', action.note || '(설명 없음)'),
           '- **실행:**',
           mdFence(plainText(commandText(action.target)), 'bash'),
           `- **결과:**${mark}${output ? '' : ' (출력 없음)'}`,
           ...(output !== '' ? [mdFence(outputText(output, action.outputLines ?? 0), 'text')] : []),
         ].join('\n')
         return (
-          <Box flexDirection="column">
-            {head('명령', KIND_COLOR.command)}
+          <Box flexDirection="column" marginTop={1}>
             <Markdown text={text} />
           </Box>
         )
@@ -1857,18 +1916,36 @@ export const register: Register = (on, options) => {
       const isCut = lines.length > OUTPUT_LINES
       const mark = run.status === 'failed' ? ' (실패)' : run.status === 'denied' ? ' (거부됨)' : run.status === 'running' ? ' 실행 중…' : ''
       const text = [
-        mdField('목적', run.purpose || run.goal),
         mdField('대상', `DB ${run.database} · 테이블 ${run.tables}`),
         '- **실행:**',
         mdFence(plainText(run.sql), 'sql'),
         `- **결과:**${mark}`,
       ].join('\n')
       return (
-        <Box flexDirection="column">
-          {head('쿼리', KIND_COLOR.query)}
+        <Box flexDirection="column" marginTop={1}>
           <Markdown text={text} />
           {run.status !== 'running' && <Markdown text={lines.slice(0, OUTPUT_LINES).join('\n')} />}
           {isCut && <Text dimColor>{`결과 앞 ${OUTPUT_LINES}줄만 보인다 (전체 ${lines.length}줄)`}</Text>}
+        </Box>
+      )
+    }
+    const opened = await read($, openPurposes)
+    /** 목적 묶음: 누르면 펼치고 다시 누르면 접는 머리줄, 그 아래 ⇒ 결과, 펼치면 공백으로 들여쓴 기록 */
+    const purposeView = (groupKey: string, group: { purpose: string; items: LogItem[] }, index: number) => {
+      const key = `purpose-${groupKey}-${index}`
+      const isOpen = opened.includes(key)
+      const result = purposeResult(group.items.map(itemPart))
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Button key={key} plain onPress={() => update($, openPurposes, list => togglePick(list, key))}>
+            <Text bold>{`${isOpen ? '▾' : '▸'} ${group.purpose}`}</Text>
+          </Button>
+          <Text color={result.color}>{`  ⇒ ${result.text}`}</Text>
+          {isOpen && (
+            <Box flexDirection="column" paddingLeft={4}>
+              {group.items.map(item => entryView(item))}
+            </Box>
+          )}
         </Box>
       )
     }
@@ -1904,7 +1981,7 @@ export const register: Register = (on, options) => {
             {shownGroups.map(group => (
               <Box flexDirection="column" marginBottom={1}>
                 {groupHead(group.at, group.heading)}
-                {group.items.map(item => entryView(item))}
+                {purposeGroups(group.items, itemPurpose, group.heading).map((one, index) => purposeView(group.key, one, index))}
               </Box>
             ))}
           </Box>
@@ -2033,31 +2110,22 @@ export const register: Register = (on, options) => {
                 <Button key="refresh-tree" onPress={() => refreshTree($)}>새로고침</Button>
                 <Text dimColor>{view ? `  ${view.at} 기준` : '  아직 읽지 않았다'}</Text>
               </Box>
-              {view && (
-                <Text>{`작업 디렉토리: ${view.cwd}${view.isCwdRepo ? '' : '  (git 저장소 아님)'}`}</Text>
-              )}
-              {view && view.repos.length === 0 && <Text dimColor>이 세션에서 사용한 git 저장소가 없다.</Text>}
+              {view && view.repos.length === 0 && <Text dimColor>이 세션에서 파일을 바꾼 워크트리가 없다.</Text>}
               {view?.repos.map(repo => (
                 <Box flexDirection="column" marginTop={1}>
                   <Text bold>{repo.root}</Text>
                   {repo.worktrees.map((wt, index) => {
-                    const branchLine = index === repo.worktrees.length - 1 ? '└─' : '├─'
-                    const marks = [
-                      wt.isMain ? '메인' : '',
-                      wt.isCwd ? '작업 디렉토리' : wt.isUsed ? '사용 중' : '',
-                      wt.changes !== null ? `변경 ${wt.changes}` : '',
-                    ].filter(Boolean)
-                    const row = (
-                      <Text dimColor={!wt.isUsed} bold={wt.isUsed} color={wt.isUsed ? 'success' : undefined}>
-                        {`${branchLine} ${wt.isUsed ? '●' : '○'} ${wt.branch}  ${relativeTo(wt.path, repo.root)}${marks.length > 0 ? `  [${marks.join(' · ')}]` : ''}`}
-                      </Text>
-                    )
-                    if (!wt.isUsed) return row
+                    const isLast = index === repo.worktrees.length - 1
                     return (
-                      <Box flexDirection="row">
-                        {row}
-                        <Text>{'  '}</Text>
-                        <Button key={`open-${wt.path}`} label="VS Code 로 열기" onPress={() => openInVsCode($, wt.path)} />
+                      <Box flexDirection="column">
+                        <Box flexDirection="row">
+                          <Text bold color="success">{`${isLast ? '└─' : '├─'} ⎇ ${wt.branch}`}</Text>
+                          <Text dimColor>{`  [${relativeTo(wt.path, repo.root)}]  `}</Text>
+                          <Button key={`open-${wt.path}`} label="VS Code 로 열기" onPress={() => openInVsCode($, wt.path)} />
+                        </Box>
+                        {(wt.files ?? []).map(file => (
+                          <Text>{`${isLast ? '   ' : '│  '}   ${file}`}</Text>
+                        ))}
                       </Box>
                     )
                   })}
@@ -2086,23 +2154,17 @@ export const register: Register = (on, options) => {
                         <Box flexDirection="row">
                           <Text bold color={badge.color}>{`  ${badge.text}  `}</Text>
                           {issueLink(url, `#${ref.number}`)}
-                          <Text>{'  '}</Text>
-                          {hasMeta && meta.isPull && <Text dimColor>{`${meta.branch}  `}</Text>}
-                          {hasMeta && meta.isPull && <Text color="success">{`+${meta.additions.toLocaleString('en-US')} `}</Text>}
-                          {hasMeta && meta.isPull && <Text color="error">{`−${meta.deletions.toLocaleString('en-US')}  `}</Text>}
-                          {hasMeta && meta.isPull && <Text color={CI_BADGE[meta.ci].color}>{`${CI_BADGE[meta.ci].text}  `}</Text>}
-                          {hasMeta && !meta.isPull && <Text dimColor>{`${cut(meta.title, 60)}  `}</Text>}
+                          {hasMeta && <Text>{`  ${cut(meta.title, 70)}`}</Text>}
                         </Box>
-                        {hasMeta && meta.isPull && <Text dimColor>{`        ${cut(meta.title, 80)}`}</Text>}
                         {!hasMeta && <Text dimColor>{`        ${meta && 'error' in meta ? `읽지 못함: ${meta.error}` : '읽는 중…'}`}</Text>}
-                        {commitRows(linked.byKey[ref.key] ?? [], '        ')}
+                        {branchRows(linked.byKey[ref.key] ?? [], '        ')}
                       </Box>
                     )
                   })}
                   {group.commits.length > 0 && (
                     <Box flexDirection="column">
                       <Text bold>{`  이슈 없는 커밋  ${group.commits.length}건`}</Text>
-                      {commitRows(group.commits, '        ')}
+                      {branchRows(group.commits, '        ')}
                     </Box>
                   )}
                 </Box>
@@ -2111,7 +2173,7 @@ export const register: Register = (on, options) => {
                 <Box flexDirection="column" marginTop={1}>
                   <Text bold dimColor>{`참고한 이슈·PR  ${consulted.length}건`}</Text>
                   {groupByRepo(consulted).map(group => (
-                    <Box flexDirection="column">
+                    <Box flexDirection="column" marginTop={1}>
                       <Text dimColor>{`  ▸ ${group.repo}`}</Text>
                       {group.refs.map(ref => {
                         const meta = metas[ref.key]
@@ -2123,8 +2185,7 @@ export const register: Register = (on, options) => {
                           <Box flexDirection="row">
                             <Text color={badge.color}>{`    ${badge.text}  `}</Text>
                             {issueLink(url, `#${ref.number}`)}
-                            <Text dimColor>{`  ${hasMeta ? cut(meta.title, 60) : '읽는 중…'}  `}</Text>
-                            <Text dimColor>{shownSources(ref.sources).join(' · ')}</Text>
+                            <Text dimColor>{`  ${hasMeta ? cut(meta.title, 70) : '읽는 중…'}`}</Text>
                           </Box>
                         )
                       })}
