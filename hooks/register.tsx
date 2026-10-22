@@ -2115,7 +2115,7 @@ export const register: Register = (on, options) => {
               <Button key="note-clipboard" label="＋ 클립보드 담기" onPress={() => noteClipboard($)} />
               <Text dimColor>{`  노트 ${allNotes.length}개`}</Text>
             </Box>
-            <Text dimColor>글을 복사한 뒤 누르면 원문 그대로 노트 하나가 된다. 노트는 그 자리에서 고친다. 줄바꿈은 Shift+Enter</Text>
+            <Text dimColor>글을 복사한 뒤 누르면 원문 그대로 노트 하나가 된다. (줄바꿈은 Shift + Enter)</Text>
             {noteGroups.length === 0 && <Text dimColor>아직 노트가 없다.</Text>}
             {noteGroups.map(group => (
               <Box flexDirection="column" marginTop={1}>
