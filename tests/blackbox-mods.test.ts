@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { ActionEntry, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
+import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, addNote, editNote, removeNote, noteRows, quotedNote, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; actions: ActionEntry[] } = { runs: [], actions: [] }
@@ -869,7 +869,7 @@ const NOW = Date.parse('2026-10-14T00:00:00.000Z')
 const ago = (ms: number) => new Date(NOW - ms).toISOString()
 
 function emptyRecords(): SavedRecords {
-  return { turns: [], reads: [], runs: [], actions: [], places: [], decisions: [], agreements: [], lastPrompt: '', tab: 'log', logPage: '' }
+  return { turns: [], reads: [], runs: [], actions: [], places: [], decisions: [], agreements: [], notes: [], lastPrompt: '', tab: 'log', logPage: '' }
 }
 
 test('deletes other sessions last updated more than 30 days ago and keeps newer ones', async () => {
@@ -1173,4 +1173,86 @@ test('keeps the issue number a link on terminal', async ($, on) => {
   const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any))
   expect(pane).toContain('"href":"https://github.com/a/x/issues/7"')
   expect(pane).not.toContain('issue-https://github.com/a/x/issues/7')
+})
+
+test('addNote keeps the text as it is and numbers notes n1, n2 …', () => {
+  const now = { t: 1, at: '14:21' }
+  expect(addNote([], '  \n', 'selection', 1, now)).toBe(undefined)
+  const one = addNote([], '  첫 줄\n둘째 줄  ', 'selection', 1, now) ?? []
+  expect(one[0]).toEqual({ id: 'n1', t: 1, at: '14:21', turn: 1, source: 'selection', original: '  첫 줄\n둘째 줄  ', text: '  첫 줄\n둘째 줄  ' })
+  const two = addNote(removeNote(addNote(one, 'b', 'clipboard', 2, now) ?? [], 'n1'), 'c', 'clipboard', 2, now) ?? []
+  expect(two.map(note => note.id)).toEqual(['n2', 'n3'])
+})
+
+test('editNote changes only the text of that note and keeps the original', () => {
+  const list = addNote([], '원문', 'selection', 1, { t: 1, at: '' }) ?? []
+  const edited = editNote(list, 'n1', '고친 글')
+  expect(edited[0]?.text).toBe('고친 글')
+  expect(edited[0]?.original).toBe('원문')
+  expect(editNote(list, 'n9', 'x')).toEqual(list)
+})
+
+test('noteRows fits the note, from 2 to 8 rows', () => {
+  expect(noteRows('한 줄')).toBe(2)
+  expect(noteRows('1\n2\n3')).toBe(3)
+  expect(noteRows(Array(20).fill('x').join('\n'))).toBe(8)
+})
+
+test('quotedNote quotes each line and keeps the draft', () => {
+  expect(quotedNote('a\nb\n', '')).toBe('> a\n> b\n')
+  expect(quotedNote('a', '이 부분 봐줘  ')).toBe('이 부분 봐줘\n\n> a\n')
+})
+
+test('notes tab: takes the selection and the clipboard as they are, edits in place, and saves', async ($, on) => {
+  const toasts: string[] = []
+  let selection: { text: string } | undefined = { text: '요청 50번이면 약 5만 토큰' }
+  on('ui.selection', async () => ({ value: selection }) as any)
+  on('ui.toast', async (_$: unknown, e: any) => {
+    toasts.push(String(e.text ?? e))
+    return { value: undefined } as any
+  })
+  on('process.run', async (_$: unknown, e: any) =>
+    e.argv[0] === 'pbpaste' ? ({ value: { exitCode: 0, stdout: 'Error: ENOENT\n    at open\n', stderr: '' } } as any) : ({ value: { exitCode: 1, stdout: '', stderr: '' } } as any),
+  )
+  on('session.cwd', async () => ({ value: '/tmp' }) as any)
+  const render = async (surface = 'desktop') => JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+  await render()
+  await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-notes', surface: 'desktop' } as any)
+  expect(await render()).toContain('아직 노트가 없다')
+  await render()
+  await $.ui.press({ plugin: 'blackbox-mods', key: 'note-selection', surface: 'desktop' } as any)
+  await render()
+  await $.ui.press({ plugin: 'blackbox-mods', key: 'note-clipboard', surface: 'desktop' } as any)
+  selection = undefined
+  await render()
+  await $.ui.press({ plugin: 'blackbox-mods', key: 'note-selection', surface: 'desktop' } as any)
+  expect(toasts.some(text => text.includes('고른 글이 없다'))).toBe(true)
+  let pane = await render()
+  expect(pane).toContain('n1 · 선택한 글')
+  expect(pane).toContain('n2 · 클립보드')
+  expect(pane).toContain('Error: ENOENT\\n    at open\\n')
+  expect(pane).not.toContain('n3')
+  await ($.ui as any).input({ plugin: 'blackbox-mods', key: 'note-n1', text: '고친 노트', kind: 'change', surface: 'desktop' })
+  pane = await render()
+  expect(pane).toContain('고친 노트')
+  expect(pane).toContain('n1 · 선택한 글')
+  expect(pane).toContain('(수정함)')
+  expect(pane).toContain('"type":"Input"')
+  expect(await render('mobile')).toContain('고친 노트')
+})
+
+test('restores saved notes of the same session', async ($, on) => {
+  const records: SavedRecords = {
+    ...emptyRecords(),
+    tab: 'notes',
+    notes: [{ id: 'n1', t: 1, at: '09:00', turn: 0, source: 'clipboard', original: '어제 담은 글', text: '어제 고친 글' }],
+  }
+  startable(on)
+  memoryStore(on, { 'session:s1': { v: 1, updatedAt: new Date().toISOString(), records } })
+  on('session.id', async () => ({ value: 's1' }) as any)
+  quietTools(on)
+  await ($.session as any).start({ cwd: '/tmp' })
+  const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any))
+  expect(pane).toContain('n1 · 클립보드 · 09:00  (수정함)')
+  expect(pane).toContain('어제 고친 글')
 })

@@ -196,7 +196,22 @@ export type Agreement = {
   decidedAt: string
 }
 
-export type TabId = 'log' | 'decisions' | 'issues' | 'tree' | 'skills' | 'agreements'
+/** 노트 탭의 노트 하나: 사용자가 대화에서 고른 글이나 클립보드 글을 원문 그대로 담는다 */
+export type Note = {
+  id: string
+  t: number
+  at: string
+  /** 담은 때의 요청. 요청 머리말로 묶을 때 쓴다 */
+  turn: number
+  /** selection: 대화에서 마우스로 고른 글, clipboard: 클립보드 글 */
+  source: 'selection' | 'clipboard'
+  /** 담은 원문. 고친 노트인지 가릴 때 쓴다 */
+  original: string
+  /** 지금 글. 사용자가 노트 탭에서 고친다 */
+  text: string
+}
+
+export type TabId = 'log' | 'decisions' | 'issues' | 'tree' | 'skills' | 'agreements' | 'notes'
 
 /** 프로세스가 끝나도 남기는 패널 기록. 세션 시작 때 다시 계산하는 값(워크 트리, Git, 스킬 사용량)은 뺀다 */
 export type SavedRecords = {
@@ -207,6 +222,7 @@ export type SavedRecords = {
   places: string[]
   decisions: Decision[]
   agreements: Agreement[]
+  notes: Note[]
   lastPrompt: string
   tab: TabId
   logPage: string
@@ -251,6 +267,7 @@ declare module 'claude-code' {
       agreements: Agreement[]
       /** 암묵적 합의 탭에서 한 번에 답하려고 고른 항목 id */
       pickedAgreements: string[]
+      notes: Note[]
       lastPrompt: string
     }
   }

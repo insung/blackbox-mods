@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { ActionEntry, Agreement, Decision, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn, Worktree } from '../types'
+import type { ActionEntry, Agreement, Decision, Note, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn, Worktree } from '../types'
 
 const LOG_PANE = 'blackbox-mods'
 const TABS: { id: TabId; label: string }[] = [
@@ -11,6 +11,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'tree', label: '워크 트리' },
   { id: 'skills', label: '스킬 사용량' },
   { id: 'agreements', label: '암묵적 합의' },
+  { id: 'notes', label: '노트' },
 ]
 const READ_TOOL = 'note_reads'
 const SUMMARY_LIMIT = 30
@@ -79,6 +80,7 @@ const skillsAt = atom({ plugin: 'blackbox-mods', key: 'skillsAt' } as const, '')
 const decisions = atom({ plugin: 'blackbox-mods', key: 'decisions' } as const, [] as Decision[])
 const agreements = atom({ plugin: 'blackbox-mods', key: 'agreements' } as const, [] as Agreement[])
 const pickedAgreements = atom({ plugin: 'blackbox-mods', key: 'pickedAgreements' } as const, [] as string[])
+const notes = atom({ plugin: 'blackbox-mods', key: 'notes' } as const, [] as Note[])
 const lastPrompt = atom({ plugin: 'blackbox-mods', key: 'lastPrompt' } as const, '')
 const tab = atom({ plugin: 'blackbox-mods', key: 'tab' } as const, 'log' as TabId)
 const logPage = atom({ plugin: 'blackbox-mods', key: 'logPage' } as const, '')
@@ -97,7 +99,7 @@ const SAVE_DELAY_MS = 1000
 /** 저장할 때 큰 값을 자른 자리에 붙이는 표시 */
 const CUT_MARK = '\n… (저장 한도를 넘어 잘림)'
 /** 저장 대상 atom 의 key. 이 atom 이 바뀌면 저장을 예약한다 */
-const SAVED_KEYS = new Set(['turns', 'reads', 'runs', 'actions', 'places', 'decisions', 'agreements', 'lastPrompt', 'tab', 'logPage'])
+const SAVED_KEYS = new Set(['turns', 'reads', 'runs', 'actions', 'places', 'decisions', 'agreements', 'notes', 'lastPrompt', 'tab', 'logPage'])
 
 export function sessionKey(id: string): string {
   return `${SESSION_PREFIX}${id}`
@@ -160,7 +162,7 @@ function cutText(text: string, size: number): string {
 /**
  * 기록이 budget 바이트를 넘으면 줄인다. 패널의 기록(메모리)은 그대로 두고 저장할 사본만 줄인다.
  * 1) 쿼리·명령 결과처럼 큰 글을 차례로 더 짧게 자른다
- * 2) 그래도 넘으면 세션 로그 목록(쿼리, 명령·파일, 읽은 파일, 요청)의 오래된 절반씩을 뺀다. 결정 사항과 암묵적 합의는 남긴다
+ * 2) 그래도 넘으면 세션 로그 목록(쿼리, 명령·파일, 읽은 파일, 요청)의 오래된 절반씩을 뺀다. 결정 사항, 암묵적 합의, 노트는 남긴다
  */
 export function shrinkRecords(records: SavedRecords, budget: number): SavedRecords {
   if (jsonBytes(records) <= budget) return records
@@ -241,6 +243,7 @@ async function savedRecords($: EngineInterface): Promise<SavedRecords> {
     places: await read($, places),
     decisions: await read($, decisions),
     agreements: await read($, agreements),
+    notes: await read($, notes),
     lastPrompt: await read($, lastPrompt),
     tab: await read($, tab),
     logPage: await read($, logPage),
@@ -293,7 +296,7 @@ async function restoreSession($: EngineInterface): Promise<void> {
   const saved = savedRecordsOf(stored)
   // 핫 리로드처럼 메모리에 이미 기록이 있으면 덮어쓰지 않는다
   const memory = await savedRecords($)
-  const isEmpty = [memory.turns, memory.reads, memory.runs, memory.actions, memory.places, memory.decisions, memory.agreements].every(list => list.length === 0)
+  const isEmpty = [memory.turns, memory.reads, memory.runs, memory.actions, memory.places, memory.decisions, memory.agreements, memory.notes].every(list => list.length === 0)
   if (saved && isEmpty) {
     isRestoring = true
     try {
@@ -306,6 +309,7 @@ async function restoreSession($: EngineInterface): Promise<void> {
       await update($, places, () => listOf<string>(saved.places))
       await update($, decisions, () => listOf<Decision>(saved.decisions))
       await update($, agreements, () => listOf<Agreement>(saved.agreements))
+      await update($, notes, () => listOf<Note>(saved.notes))
       await update($, lastPrompt, () => textOf(saved.lastPrompt))
       await update($, tab, () => (TABS.some(one => one.id === saved.tab) ? (saved.tab as TabId) : 'log'))
       await update($, logPage, () => textOf(saved.logPage))
@@ -1206,6 +1210,75 @@ async function answerPicked($: EngineInterface, option: string): Promise<void> {
   await update($, pickedAgreements, () => [])
 }
 
+/** 노트 입력란의 최대 줄 수. 더 긴 노트는 입력란 안에서 스크롤한다 */
+const NOTE_ROWS = 8
+const NOTE_SOURCE_LABEL: Record<Note['source'], string> = { selection: '선택한 글', clipboard: '클립보드' }
+
+/** 글을 노트 하나로 맨 뒤에 더한다. 공백뿐인 글이면 더하지 않고 undefined. id 는 n1, n2 … 로 이어 붙인다 */
+export function addNote(list: Note[], text: string, source: Note['source'], turn: number, now: { t: number; at: string }): Note[] | undefined {
+  if (!text.trim()) return undefined
+  const last = Math.max(0, ...list.map(one => Number(one.id.slice(1)) || 0))
+  return [...list, { id: `n${last + 1}`, t: now.t, at: now.at, turn, source, original: text, text }]
+}
+
+export function editNote(list: Note[], id: string, text: string): Note[] {
+  return list.map(one => (one.id === id ? { ...one, text } : one))
+}
+
+export function removeNote(list: Note[], id: string): Note[] {
+  return list.filter(one => one.id !== id)
+}
+
+/** 노트 입력란 줄 수: 노트 줄 수에 맞추되 2줄 이상, NOTE_ROWS 이하 */
+export function noteRows(text: string): number {
+  return Math.min(NOTE_ROWS, Math.max(2, text.split('\n').length))
+}
+
+/** 노트를 `> ` 인용으로 바꿔 프롬프트 창 글 뒤에 붙인다. 쓰던 글이 있으면 빈 줄 하나를 둔다 */
+export function quotedNote(text: string, draft: string): string {
+  const quote = text.replace(/\s+$/, '').replace(/^/gm, '> ')
+  return draft.trim() ? `${draft.replace(/\s+$/, '')}\n\n${quote}\n` : `${quote}\n`
+}
+
+async function saveNote($: EngineInterface, text: string, source: Note['source']): Promise<void> {
+  const turn = await currentTurn($)
+  const list = addNote(await read($, notes), text, source, turn, { t: Date.now(), at: timeNow() })
+  if (!list) return
+  await update($, notes, () => list)
+  $.ui.toast(`노트에 담았다: ${list.at(-1)?.id}`)
+}
+
+/** 대화에서 마우스로 고른 글을 원문 그대로 노트에 담는다 */
+async function noteSelection($: EngineInterface): Promise<void> {
+  const selected = await $.ui.selection().catch(() => undefined)
+  if (!selected?.text.trim()) {
+    $.ui.toast('고른 글이 없다. 대화에서 글을 드래그해 고른 뒤 다시 누른다')
+    return
+  }
+  await saveNote($, selected.text, 'selection')
+}
+
+/** 클립보드 글을 원문 그대로 노트에 담는다. 엔진에 클립보드 읽기 API 가 없어 macOS pbpaste 로 읽는다 */
+async function noteClipboard($: EngineInterface): Promise<void> {
+  const ran = await $.process.run(['pbpaste'], { timeoutMs: 5000 }).catch(error => ({ exitCode: 1, stdout: '', stderr: String(error) }))
+  if (ran.exitCode !== 0) {
+    $.ui.toast(`클립보드를 읽지 못했다: ${ran.stderr.trim().split('\n')[0] ?? ''}`)
+    return
+  }
+  if (!ran.stdout.trim()) {
+    $.ui.toast('클립보드가 비어 있다')
+    return
+  }
+  await saveNote($, ran.stdout, 'clipboard')
+}
+
+/** 노트를 인용으로 프롬프트 창에 넣는다. 보내기는 사용자가 한다 */
+async function quoteToPrompt($: EngineInterface, text: string): Promise<void> {
+  const box = await $.prompt.read()
+  const filled = await $.prompt.fill({ text: quotedNote(text, box.text), mode: 'replace' })
+  if (!filled.isFilled) $.ui.toast('프롬프트 창을 채우지 못했다')
+}
+
 /** 데스크톱 앱 내장 브라우저(Browser pane)의 MCP 서버 이름 */
 export const BROWSER_SERVER = 'Claude_Browser'
 
@@ -1388,7 +1461,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'blackbox-mods',
-      description: 'Blackbox 패널을 연다 (탭: 세션 로그·결정 사항·Git·워크 트리·스킬 사용량·암묵적 합의)',
+      description: 'Blackbox 패널을 연다 (탭: 세션 로그·결정 사항·Git·워크 트리·스킬 사용량·암묵적 합의·노트)',
     })
     await $.tool.register({
       name: DECISION_TOOL,
@@ -1604,7 +1677,7 @@ export const register: Register = (on, options) => {
     await refreshIssues($).catch(() => undefined)
     await refreshSkills($).catch(() => undefined)
 
-    return { text: 'Blackbox 패널을 열었다. 위쪽 탭으로 세션 로그·결정 사항·Git·워크 트리·스킬 사용량·암묵적 합의를 바꿔 본다.' }
+    return { text: 'Blackbox 패널을 열었다. 위쪽 탭으로 세션 로그·결정 사항·Git·워크 트리·스킬 사용량·암묵적 합의·노트를 바꿔 본다.' }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -1634,7 +1707,10 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: LOG_PANE }, async ($, e) => {
-    const { Box, Text, Button, Code, Markdown, Link } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button, Code, Markdown, Link } = elements
+    /** 입력란이 없는 표면(모바일)에서는 노트를 읽기 전용 글로 보인다 */
+    const Input = e.surface !== 'mobile' && 'Input' in elements ? elements.Input : undefined
     /** 데스크톱 앱에서는 이슈·PR 번호를 누르면 내장 브라우저에서 열고, 다른 표면에서는 링크로 둔다 */
     const issueLink = (url: string, label: string) =>
       e.surface === 'desktop' ? (
@@ -1687,6 +1763,14 @@ export const register: Register = (on, options) => {
     }
     const picked = pickedIds(await read($, pickedAgreements), allAgreements)
     const assumedCount = allAgreements.filter(one => one.status === 'assumed').length
+    const allNotes = await read($, notes)
+    // 오래된 요청 묶음부터 담은 순서대로 보인다. 요청 기록 전에 담은 노트(turn 0)도 한 묶음이다
+    const noteGroups: { turn: number; at: string; heading: string; items: Note[] }[] = []
+    for (const one of allNotes) {
+      const group = noteGroups.find(g => g.turn === one.turn)
+      if (group) group.items.push(one)
+      else noteGroups.push({ turn: one.turn, ...headOf(one.turn, one.at), items: [one] })
+    }
     const quoteOf = (one: Decision | Agreement) => {
       const quote = one.userQuote.replace(/\s+/g, ' ').trim()
       if (quote.length <= 60) return quote
@@ -1901,6 +1985,44 @@ export const register: Register = (on, options) => {
                     </Box>
                   )
                 })}
+              </Box>
+            ))}
+          </Box>
+        )}
+        {current === 'notes' && (
+          <Box flexDirection="column">
+            <Box flexDirection="row">
+              <Button key="note-selection" label="＋ 선택한 글 담기" onPress={() => noteSelection($)} />
+              <Button key="note-clipboard" label="＋ 클립보드 담기" onPress={() => noteClipboard($)} />
+              <Text dimColor>{`  노트 ${allNotes.length}개`}</Text>
+            </Box>
+            <Text dimColor>대화에서 글을 드래그해 고르거나 복사한 뒤 누르면 원문 그대로 노트 하나가 된다. 노트는 그 자리에서 고친다</Text>
+            {noteGroups.length === 0 && <Text dimColor>아직 노트가 없다.</Text>}
+            {noteGroups.map(group => (
+              <Box flexDirection="column" marginTop={1}>
+                {groupHead(group.at, group.heading)}
+                {group.items.map(one => (
+                  <Box flexDirection="column" marginTop={1}>
+                    <Text bold color="suggestion">{`${one.id} · ${NOTE_SOURCE_LABEL[one.source]} · ${one.at}${one.text !== one.original ? '  (수정함)' : ''}`}</Text>
+                    {Input ? (
+                      <Input
+                        key={`note-${one.id}`}
+                        value={one.text}
+                        rows={noteRows(one.text)}
+                        submitLabel="저장"
+                        onInput={value => void update($, notes, list => editNote(list, one.id, value))}
+                        onSubmit={value => void update($, notes, list => editNote(list, one.id, value))}
+                      />
+                    ) : (
+                      <Text>{one.text}</Text>
+                    )}
+                    <Box flexDirection="row">
+                      <Button key={`note-copy-${one.id}`} label="복사" onPress={press => void $.ui.copy({ text: one.text, surface: press.surface })} />
+                      <Button key={`note-quote-${one.id}`} label="프롬프트에 넣기" onPress={() => quoteToPrompt($, one.text)} />
+                      <Button key={`note-remove-${one.id}`} label="삭제" onPress={() => update($, notes, list => removeNote(list, one.id))} />
+                    </Box>
+                  </Box>
+                ))}
               </Box>
             ))}
           </Box>
