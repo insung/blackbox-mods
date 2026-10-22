@@ -195,15 +195,17 @@ export type Agreement = {
   decidedAt: string
 }
 
-/** 노트 탭의 노트 하나: 사용자가 대화에서 고른 글이나 클립보드 글을 원문 그대로 담는다 */
+/** 노트 탭의 노트 하나: 사용자가 복사한 클립보드 글을 원문 그대로 담는다 */
 export type Note = {
   id: string
   t: number
   at: string
   /** 담은 때의 요청. 요청 머리말로 묶을 때 쓴다 */
   turn: number
-  /** selection: 대화에서 마우스로 고른 글, clipboard: 클립보드 글 */
-  source: 'selection' | 'clipboard'
+  /** 글을 가져온 곳. 지금은 클립보드뿐이다 */
+  source: 'clipboard'
+  /** 노트 머리에 보이는 짧은 제목. haiku 가 만들고, 만들기 전에는 빈 값 */
+  title: string
   /** 담은 원문. 고친 노트인지 가릴 때 쓴다 */
   original: string
   /** 지금 글. 사용자가 노트 탭에서 고친다 */
@@ -267,6 +269,8 @@ declare module 'claude-code' {
       /** 암묵적 합의 탭에서 한 번에 답하려고 고른 항목 id */
       pickedAgreements: string[]
       notes: Note[]
+      /** 노트 탭에서 크게 보기로 펼친 노트 id */
+      wideNotes: string[]
       /** 세션 로그에서 펼친 목적 묶음의 버튼 키 */
       openPurposes: string[]
       lastPrompt: string
