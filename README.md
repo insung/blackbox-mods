@@ -14,7 +14,7 @@ Open it with `/blackbox-mods`. Only this command opens the panel. Records keep a
 | Worktrees | Only the git worktrees where this session changed files with Edit·Write·NotebookEdit, as a tree per repository, in the order they were first changed. Each row is `⎇ branch  [path]  [VS Code 로 열기]`, with the changed files under it as paths inside the worktree. Places only read, or changed only with Bash, are not shown |
 | Skill usage | Skill runs grouped by plugin, custom skills, and built-in skills, with counts, shares, and an excerpt of the request that triggered each run |
 | Implicit agreements | What Claude took as agreed without anyone asking: scope, terms, way of working, how a request was read, and the like. Each item shows its kind and evidence, grouped by request from oldest to newest, under the same request header as the session log. Press an assumed item (`[?]`) to pick it (`▶`) and again to unpick it. `선택 맞음` (yes) and `선택 아님` (no) fill the prompt box with the picked ids joined by commas, such as `a1, a3: 맞음`, and clear the picks; `선택 해제` only clears them. You send it. Confirmed items show `[o]`, revoked items `[-]` with what changed |
-| Notes | Text you pick yourself, kept word for word. Drag over text in the conversation and press `＋ 선택한 글 담기` (add selection), or copy text and press `＋ 클립보드 담기` (add clipboard). Each press adds one note (`n1`, `n2` …) at the bottom, under the header of the request it was taken in. Each note is a multi-line field you edit in place; changes save as you type, and an edited note shows `(수정함)`. Under each note: `복사` (copy), `프롬프트에 넣기` (puts the note in the prompt box as a `> ` quote; you send it) and `삭제` (delete). The mobile app shows notes read-only. Notes call no model and add nothing to the system prompt |
+| Notes | Text you copied, kept word for word. Copy text (⌘C) and press `＋ 클립보드 담기` (add clipboard). Each press adds one note at the bottom, under the header of the request it was taken in. Each note header shows a short title that `haiku` makes from the note, the time, and `(수정함)` once edited, then `크게 보기` (show larger) and `삭제` (delete; press twice within 3 seconds). Each note is a multi-line field you edit in place; changes save as you type. Shift+Enter adds a line; Enter does not delete. Under each note: `복사` (copy) and `프롬프트에 넣기` (puts the note in the prompt box as a `> ` quote; you send it). The mobile app shows notes read-only. Text selected in the conversation cannot be taken: the desktop app does not pass it to mods |
 
 ## Install
 
@@ -63,6 +63,7 @@ Automatic records (no tool call needed): Bash commands that run `run_query.py` o
 | Model summary (`haiku`, through your Claude Code session) | When you send a request longer than 30 characters | The first 4,000 characters of the request, once, to make the one-line summary |
 | `git`, `code` (VS Code) | Worktrees tab, "Open in VS Code" button | Local commands only |
 | `pbpaste` | Notes tab, "add clipboard" button | Local command only (macOS) |
+| Model title (`haiku`, through your Claude Code session) | When a note is added | The first 4,000 characters of the note, once, to make its title |
 
 References that GitHub answers with 404 are hidden.
 
