@@ -19,7 +19,6 @@ const AGREEMENT_TOOL = 'track_agreements'
 const QUERY_COMMAND = /run_query\.py|(^|[\s;&|])mysql\s/
 const OUTPUT_LINES = 30
 /** 세션 로그 항목 머리의 색: 종류마다 다르게 해 항목끼리 구분한다 */
-const KIND_COLOR = { read: 'suggestion', file: 'success', command: 'bashBorder', query: 'permission' } as const
 /** Git 탭의 이슈·PR 번호 색. Link 에는 색 속성이 없어 감싼 Text 로 칠한다 */
 const LINK_COLOR = 'suggestion'
 const AGREEMENT_KINDS = ['premise', 'scope', 'term', 'method', 'reading', 'format'] as const
@@ -81,6 +80,8 @@ const skillsAt = atom({ plugin: 'blackbox-mods', key: 'skillsAt' } as const, '')
 const decisions = atom({ plugin: 'blackbox-mods', key: 'decisions' } as const, [] as Decision[])
 const agreements = atom({ plugin: 'blackbox-mods', key: 'agreements' } as const, [] as Agreement[])
 const pickedAgreements = atom({ plugin: 'blackbox-mods', key: 'pickedAgreements' } as const, [] as string[])
+/** 세션 로그에서 펼친 목적 묶음의 버튼 키 */
+const openPurposes = atom({ plugin: 'blackbox-mods', key: 'openPurposes' } as const, [] as string[])
 const lastPrompt = atom({ plugin: 'blackbox-mods', key: 'lastPrompt' } as const, '')
 const tab = atom({ plugin: 'blackbox-mods', key: 'tab' } as const, 'log' as TabId)
 const logPage = atom({ plugin: 'blackbox-mods', key: 'logPage' } as const, '')
@@ -1342,6 +1343,48 @@ async function recordAction($: EngineInterface, e: { tool: string } & Record<str
   await update($, actions, list => [...list, entry].slice(-200))
 }
 
+/** 하위 에이전트를 부르기 전에 Agent 호출을 기록한다. 하위 에이전트의 기록이 이 뒤에 쌓여 이 description 을 목적으로 삼는다 */
+async function recordAgent($: EngineInterface, e: Record<string, unknown>) {
+  const note = typeof e.description === 'string' ? e.description.trim() : ''
+  if (!note) return
+  const target = typeof e.subagent_type === 'string' ? e.subagent_type : ''
+  const turn = await currentTurn($)
+  const id = typeof e.tool_use_id === 'string' ? e.tool_use_id : `g${Date.now()}`
+  const entry: ActionEntry = { id, kind: 'agent', target, note, status: 'done', output: '', outputLines: 0, t: Date.now(), at: timeNow(), turn }
+  await update($, actions, list => [...list, entry].slice(-200))
+}
+
+/** 목적 없는 기록의 자리표: 쿼리 기록은 description 이 없으면 이 글을 목표로 둔다 */
+const NO_GOAL = '(목표 설명 없음)'
+
+/**
+ * 요청 묶음 안의 기록을 목적별로 묶는다. 같은 목적이 연이은 기록이 한 묶음이다.
+ * 목적 없는 기록은 바로 앞 목적에 넣고, 맨 앞이면 fallback(요청 요약)을 목적으로 쓴다
+ */
+export function purposeGroups<T>(items: readonly T[], purposeOf: (item: T) => string, fallback: string): { purpose: string; items: T[] }[] {
+  const groups: { purpose: string; items: T[] }[] = []
+  for (const item of items) {
+    const own = purposeOf(item).trim()
+    const last = groups.at(-1)
+    if (last && (!own || own === last.purpose)) last.items.push(item)
+    else groups.push({ purpose: own || fallback, items: [item] })
+  }
+  return groups
+}
+
+/** 목적 묶음의 결과 한 줄: 읽은 파일 결론이 있으면 그 결론, 없으면 실행 성공·실패 요약 */
+export function purposeResult(parts: readonly { kind: 'read' | 'command' | 'file' | 'agent' | 'run'; status?: string; result?: string }[]): { text: string; color: string | undefined } {
+  const results = parts.filter(one => one.kind === 'read' && one.result).map(one => one.result ?? '')
+  if (results.length > 0) return { text: results.join(' / '), color: undefined }
+  const ran = parts.filter(one => (one.kind === 'command' || one.kind === 'run') && one.status !== 'running')
+  const failed = ran.filter(one => one.status === 'failed' || one.status === 'denied').length
+  if (failed > 0) return { text: `실행 ${ran.length}건 중 ${failed}건 실패`, color: 'error' }
+  if (ran.length > 0) return { text: `실행 ${ran.length}건 모두 성공`, color: 'success' }
+  const files = parts.filter(one => one.kind === 'file').length
+  if (files > 0) return { text: `파일 ${files}개 작성·수정`, color: 'success' }
+  return { text: '아직 결과 없음', color: 'subtle' }
+}
+
 async function record($: EngineInterface, e: { command: string; description?: string; tool_use_id: string }): Promise<QueryRun> {
   let sql = sqlOf(e.command)
   const file = e.command.match(/--file[\s=]+(\S+)/)?.[1]
@@ -1357,7 +1400,7 @@ async function record($: EngineInterface, e: { command: string; description?: st
     turn,
     t: Date.now(),
     at: timeNow(),
-    goal: e.description?.trim() || '(목표 설명 없음)',
+    goal: e.description?.trim() || NO_GOAL,
     purpose: purposeOf(sql),
     database: databaseOf(e.command),
     tables: tablesOf(sql),
@@ -1620,6 +1663,7 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', async ($, e, next) => {
+    if (e.tool === 'Agent') await recordAgent($, e as unknown as Record<string, unknown>).catch(() => undefined)
     const ran = await next(e)
     if (e.tool === 'Read' && ran.deny === undefined && !ran.isError) {
       const file = (e as unknown as { file_path?: unknown }).file_path
@@ -1735,23 +1779,28 @@ export const register: Register = (on, options) => {
       </Box>
     )
     type LogItem = (typeof entries)[number]
-    /** 기록 머리: 종류를 색 있는 ▌ 줄로 보인다 */
-    const head = (name: string, color: string) => (
-      <Box flexDirection="row" marginTop={1}>
-        <Text bold color={color}>{`▌ ${name}`}</Text>
-      </Box>
-    )
+    /** 기록 하나의 목적. 파일 수정에는 목적이 없어 앞 목적을 따른다 */
+    const itemPurpose = (item: LogItem) => {
+      if (item.kind === 'read') return item.entry.purpose
+      if (item.kind === 'run') return item.run.purpose || (item.run.goal === NO_GOAL ? '' : item.run.goal)
+      return item.action.kind === 'file' ? '' : item.action.note
+    }
+    const itemPart = (item: LogItem) =>
+      item.kind === 'read'
+        ? { kind: 'read' as const, result: item.entry.result }
+        : item.kind === 'run'
+          ? { kind: 'run' as const, status: item.run.status }
+          : { kind: item.action.kind, status: item.action.status }
+    /** 펼친 목적 묶음 안의 기록 하나. 목적은 묶음 머리줄에 있어 다시 쓰지 않는다 */
     const entryView = (item: LogItem) => {
       if (item.kind === 'read') {
         const entry = item.entry
         const text = [
-          mdField('목적', entry.purpose || '(Claude 가 아직 정리하지 않음)'),
           ...(entry.files.length > 0 ? ['- **읽은 파일:**', ...entry.files.map(file => `  - ${mdInline(file)}`)] : []),
           mdField('결과', entry.result || '(Claude 가 아직 정리하지 않음)'),
         ].join('\n')
         return (
-          <Box flexDirection="column">
-            {head('파일 읽기', KIND_COLOR.read)}
+          <Box flexDirection="column" marginTop={1}>
             <Markdown text={text} />
           </Box>
         )
@@ -1759,25 +1808,21 @@ export const register: Register = (on, options) => {
       if (item.kind === 'action') {
         const action = item.action
         const mark = action.status === 'failed' ? ' (실패)' : action.status === 'denied' ? ' (거부됨)' : ''
+        if (action.kind === 'agent') {
+          return <Text dimColor>{`- 하위 에이전트에게 맡김${action.target ? ` (${action.target})` : ''}`}</Text>
+        }
         if (action.kind === 'file') {
-          return (
-            <Box flexDirection="column">
-              {head(`파일 ${action.note}`, KIND_COLOR.file)}
-              <Text color={KIND_COLOR.file}>{`  ${action.target}`}</Text>
-            </Box>
-          )
+          return <Markdown text={mdField(action.note, action.target)} />
         }
         const output = action.output ?? ''
         const text = [
-          mdField('목적', action.note || '(설명 없음)'),
           '- **실행:**',
           mdFence(plainText(commandText(action.target)), 'bash'),
           `- **결과:**${mark}${output ? '' : ' (출력 없음)'}`,
           ...(output !== '' ? [mdFence(outputText(output, action.outputLines ?? 0), 'text')] : []),
         ].join('\n')
         return (
-          <Box flexDirection="column">
-            {head('명령', KIND_COLOR.command)}
+          <Box flexDirection="column" marginTop={1}>
             <Markdown text={text} />
           </Box>
         )
@@ -1787,18 +1832,36 @@ export const register: Register = (on, options) => {
       const isCut = lines.length > OUTPUT_LINES
       const mark = run.status === 'failed' ? ' (실패)' : run.status === 'denied' ? ' (거부됨)' : run.status === 'running' ? ' 실행 중…' : ''
       const text = [
-        mdField('목적', run.purpose || run.goal),
         mdField('대상', `DB ${run.database} · 테이블 ${run.tables}`),
         '- **실행:**',
         mdFence(plainText(run.sql), 'sql'),
         `- **결과:**${mark}`,
       ].join('\n')
       return (
-        <Box flexDirection="column">
-          {head('쿼리', KIND_COLOR.query)}
+        <Box flexDirection="column" marginTop={1}>
           <Markdown text={text} />
           {run.status !== 'running' && <Markdown text={lines.slice(0, OUTPUT_LINES).join('\n')} />}
           {isCut && <Text dimColor>{`결과 앞 ${OUTPUT_LINES}줄만 보인다 (전체 ${lines.length}줄)`}</Text>}
+        </Box>
+      )
+    }
+    const opened = await read($, openPurposes)
+    /** 목적 묶음: 누르면 펼치고 다시 누르면 접는 머리줄, 그 아래 ⇒ 결과, 펼치면 공백으로 들여쓴 기록 */
+    const purposeView = (groupKey: string, group: { purpose: string; items: LogItem[] }, index: number) => {
+      const key = `purpose-${groupKey}-${index}`
+      const isOpen = opened.includes(key)
+      const result = purposeResult(group.items.map(itemPart))
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Button key={key} plain onPress={() => update($, openPurposes, list => togglePick(list, key))}>
+            <Text bold>{`${isOpen ? '▾' : '▸'} ${group.purpose}`}</Text>
+          </Button>
+          <Text color={result.color}>{`  ⇒ ${result.text}`}</Text>
+          {isOpen && (
+            <Box flexDirection="column" paddingLeft={4}>
+              {group.items.map(item => entryView(item))}
+            </Box>
+          )}
         </Box>
       )
     }
@@ -1834,7 +1897,7 @@ export const register: Register = (on, options) => {
             {shownGroups.map(group => (
               <Box flexDirection="column" marginBottom={1}>
                 {groupHead(group.at, group.heading)}
-                {group.items.map(item => entryView(item))}
+                {purposeGroups(group.items, itemPurpose, group.heading).map((one, index) => purposeView(group.key, one, index))}
               </Box>
             ))}
           </Box>

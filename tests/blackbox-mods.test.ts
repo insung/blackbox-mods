@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { ActionEntry, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords } from '../hooks/register'
+import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords, purposeGroups, purposeResult } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; actions: ActionEntry[] } = { runs: [], actions: [] }
@@ -11,6 +11,15 @@ function watch(on: any) {
     return next(e)
   })
   return seen
+}
+
+/** 세션 로그의 목적 묶음을 모두 펼친 뒤 다시 그린 패널 */
+async function expandLog($: any, surface: string): Promise<string> {
+  const render = async () => JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface }))
+  for (const match of (await render()).matchAll(/"key":"(purpose-[^"]+)"/g)) {
+    await $.ui.press({ plugin: 'blackbox-mods', key: match[1], surface })
+  }
+  return render()
 }
 
 function answerTools(on: any, stdout = '') {
@@ -82,7 +91,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`draws the log tab and switches to the tree tab on ${surface}`, async ($, on) => {
     answerTools(on, '| a |\n|---|\n| 1 |')
     await ($.tool.call as any)({ tool: 'Bash', description: 'g', command: `python3 run_query.py -D web_mihd "SELECT a FROM t"` } as any)
-    const log = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    const log = await expandLog($, surface)
     expect(log).toContain('SELECT a FROM t')
     expect(log).toContain('▶ 세션 로그')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-tree', surface } as any)
@@ -592,22 +601,34 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'mcp__blackbox-mods__note_reads', purpose: '배치 문서 확인', result: '기준일이 -2일로 바뀌었다' } as any)
     await ($.tool.call as any)({ tool: 'Bash', description: '배치 폴더 확인', command: 'ls batch' } as any)
     await ($.tool.call as any)({ tool: 'Edit', file_path: '/Users/b/mi/a.py', old_string: 'x', new_string: 'y' } as any)
-    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(pane).toContain('{"type":"Markdown","props":{"text":"## 카카오톡 DAU 조회"}}')
-    expect(pane.match(/"\[[^"\]]+\]"/g)?.length).toBe(1)
-    expect(pane).not.toMatch(/── \[/)
-    expect(pane).toContain('"children":["▌ 명령"]')
-    expect(pane).toContain('- **목적:** 배치 폴더 확인\\n- **실행:**\\n  ```bash\\n  ls batch\\n  ```\\n- **결과:**\\n  ```text\\n  | a |\\n  |---|\\n  | 1 |\\n  ```')
-    expect(pane).toContain('▌ 명령')
-    expect(pane).toContain('▌ 파일 수정')
-    expect(pane).toContain('  /Users/b/mi/a.py')
-    expect(pane).toContain('▌ 쿼리')
-    expect(pane).toContain('▌ 파일 읽기')
+    // 접힌 상태: 목적 머리줄과 ⇒ 결과만 보인다
+    const folded = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(folded).toContain('{"type":"Markdown","props":{"text":"## 카카오톡 DAU 조회"}}')
+    expect(folded.match(/"\[[^"\]]+\]"/g)?.length).toBe(1)
+    expect(folded).toContain('▸ 날짜별 OS별 사용자수')
+    expect(folded).toContain('▸ 배치 문서 확인')
+    expect(folded).toContain('  ⇒ 기준일이 -2일로 바뀌었다')
+    expect(folded).toContain('▸ 배치 폴더 확인')
+    expect(folded).toContain('  ⇒ 실행 1건 모두 성공')
+    expect(folded).not.toContain('ls batch')
+    expect(folded).not.toContain('건수')
+    expect(folded).not.toContain('▌')
+    // 펼친 상태: 목적은 머리줄에만 있고, 기록은 공백으로 들여쓴다
+    const pane = await expandLog($, surface)
+    expect(pane).toContain('▾ 배치 폴더 확인')
+    expect(pane).toContain('"paddingLeft":4')
+    expect(pane).not.toContain('- **목적:**')
+    expect(pane).toContain('- **실행:**\\n  ```bash\\n  ls batch\\n  ```\\n- **결과:**\\n  ```text\\n  | a |\\n  |---|\\n  | 1 |\\n  ```')
+    expect(pane).toContain('- **수정:** /Users/b/mi/a.py')
+    expect(pane.indexOf('▾ 배치 폴더 확인')).toBeLessThan(pane.indexOf('/Users/b/mi/a.py'))
     expect(pane).not.toContain('run_query.py')
-    expect(pane).toContain('- **목적:** 날짜별 OS별 사용자수\\n- **대상:** DB web\\\\_mihd · 테이블 t\\n- **실행:**\\n  ```sql')
+    expect(pane).toContain('- **대상:** DB web\\\\_mihd · 테이블 t\\n- **실행:**\\n  ```sql')
     expect(pane).toContain('SELECT a FROM t')
-    expect(pane).toContain('- **목적:** 배치 문서 확인\\n- **읽은 파일:**\\n  - /Users/b/mi/.worktree/x/README.md\\n- **결과:** 기준일이 -2일로 바뀌었다')
+    expect(pane).toContain('- **읽은 파일:**\\n  - /Users/b/mi/.worktree/x/README.md\\n- **결과:** 기준일이 -2일로 바뀌었다')
     expect(pane).not.toContain('결정 대기')
+    // 다시 누르면 접힌다
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'purpose-turn-1-2', surface } as any)
+    expect(JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))).not.toContain('ls batch')
   })
 }
 
@@ -736,30 +757,31 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'Bash', description: '첫 명령', command: 'ls one' } as any)
     await $.prompt.submit({ text: '둘째 요청' } as any).catch(() => undefined)
     await ($.tool.call as any)({ tool: 'Bash', description: '둘째 명령', command: 'ls two' } as any)
+    // 목적 묶음은 접혀 있어 머리줄의 목적으로 요청 묶음을 가린다
     let pane = await render()
     expect(pane).toContain('  2 / 2  ')
-    expect(pane).toContain('ls two')
-    expect(pane).not.toContain('ls one')
+    expect(pane).toContain('▸ 둘째 명령')
+    expect(pane).not.toContain('첫 명령')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'log-prev', surface } as any)
     pane = await render()
     expect(pane).toContain('  1 / 2  ')
-    expect(pane).toContain('ls one')
-    expect(pane).not.toContain('ls two')
+    expect(pane).toContain('▸ 첫 명령')
+    expect(pane).not.toContain('둘째 명령')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'log-prev', surface } as any)
     expect(await render()).toContain('  1 / 2  ')
     await $.prompt.submit({ text: '셋째 요청' } as any).catch(() => undefined)
     await ($.tool.call as any)({ tool: 'Bash', description: '셋째 명령', command: 'ls three' } as any)
     pane = await render()
     expect(pane).toContain('  1 / 3  ')
-    expect(pane).toContain('ls one')
+    expect(pane).toContain('첫 명령')
     await $.ui.press({ plugin: 'blackbox-mods', key: 'log-next', surface } as any)
     await $.ui.press({ plugin: 'blackbox-mods', key: 'log-next', surface } as any)
-    expect(await render()).toContain('ls three')
+    expect(await render()).toContain('셋째 명령')
     await $.prompt.submit({ text: '넷째 요청' } as any).catch(() => undefined)
     await ($.tool.call as any)({ tool: 'Bash', description: '넷째 명령', command: 'ls four' } as any)
     pane = await render()
     expect(pane).toContain('  4 / 4  ')
-    expect(pane).toContain('ls four')
+    expect(pane).toContain('넷째 명령')
   })
 }
 
@@ -777,9 +799,45 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('process.run', async () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }) as any)
     on('session.cwd', async () => ({ value: '/tmp' }) as any)
     await ($.tool.call as any)({ tool: 'Bash', description: '색 출력', command: 'ls --color' } as any)
-    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(pane).toContain('▌ 명령')
+    const pane = await expandLog($, surface)
+    expect(pane).toContain('▾ 색 출력')
     expect(pane).toContain('- **결과:**\\n  ```text\\n  red\\n  ok\\n  ```')
+  })
+}
+
+test('groups records by purpose, putting records without one under the purpose before them', async () => {
+  const groups = purposeGroups(['', 'a', '', 'a', 'b', '', 'c'], one => one, '요청 요약')
+  expect(groups.map(g => [g.purpose, g.items.length])).toEqual([['요청 요약', 1], ['a', 3], ['b', 2], ['c', 1]])
+  expect(purposeGroups([], one => String(one), 'x')).toEqual([])
+})
+
+test('sums a purpose result from read conclusions, else from command status', async () => {
+  expect(purposeResult([{ kind: 'command', status: 'done' }, { kind: 'read', result: '결론' }]).text).toBe('결론')
+  expect(purposeResult([{ kind: 'command', status: 'done' }, { kind: 'run', status: 'done' }, { kind: 'file', status: 'done' }])).toEqual({ text: '실행 2건 모두 성공', color: 'success' })
+  expect(purposeResult([{ kind: 'command', status: 'done' }, { kind: 'command', status: 'denied' }])).toEqual({ text: '실행 2건 중 1건 실패', color: 'error' })
+  expect(purposeResult([{ kind: 'file', status: 'done' }]).text).toBe('파일 1개 작성·수정')
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`puts a sub-agent's records under its Agent description on ${surface}`, async ($, on) => {
+    answerTools(on)
+    on('model.complete', async () => ({ value: { isAnswered: true, text: '카드 엔진 구현', usage: {} } }) as any)
+    on('prompt.submit', async (_$: unknown, e: any) => ({ text: e.text }) as any)
+    await $.prompt.submit({ text: '카드 엔진을 구현해줘' } as any).catch(() => undefined)
+    await ($.tool.call as any)({ tool: 'Bash', description: '이슈 본문 확인', command: 'gh issue view 4' } as any)
+    // Agent 호출이 먼저 기록되고, 뒤따르는 description 없는 하위 에이전트 기록은 그 아래에 묶인다
+    await ($.tool.call as any)({ tool: 'Agent', description: '카드 엔진 1~3단계 구현', subagent_type: 'general-purpose', prompt: '…' } as any)
+    await ($.tool.call as any)({ tool: 'Bash', command: 'git status' } as any)
+    await ($.tool.call as any)({ tool: 'Write', file_path: '/tmp/engine.py', content: '' } as any)
+    const folded = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(folded).toContain('▸ 이슈 본문 확인')
+    expect(folded).toContain('▸ 카드 엔진 1~3단계 구현')
+    expect(folded).not.toContain('목적 없음')
+    expect(folded).not.toContain('설명 없음')
+    const pane = await expandLog($, surface)
+    expect(pane.indexOf('▾ 카드 엔진 1~3단계 구현')).toBeLessThan(pane.indexOf('git status'))
+    expect(pane.indexOf('git status')).toBeLessThan(pane.indexOf('/tmp/engine.py'))
+    expect(pane).toContain('하위 에이전트에게 맡김 (general-purpose)')
   })
 }
 
@@ -1143,15 +1201,16 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'Bash', description: '마지막 적재 시각 확인', command: 'ls load' } as any)
     await ($.tool.call as any)({ tool: 'Bash', description: '배치 로그 확인', command: 'ls batch' } as any)
     await ($.tool.call as any)({ tool: 'Edit', file_path: '/tmp/fix.py', old_string: 'a', new_string: 'b' } as any)
-    const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    const pane = await expandLog($, surface)
     const at = (text: string) => pane.indexOf(text)
     expect(at('## 실시간 순위 장애 대응')).toBeLessThan(at('마지막 적재 시각 확인'))
     expect(at('마지막 적재 시각 확인')).toBeLessThan(at('배치 로그 확인'))
-    expect(at('배치 로그 확인')).toBeLessThan(at('▌ 파일 수정'))
-    expect(pane.match(/"▌ 명령"/g)?.length).toBe(2)
+    // 목적 없는 파일 수정은 바로 앞 목적 묶음에 들어간다
+    expect(at('▾ 배치 로그 확인')).toBeLessThan(at('/tmp/fix.py'))
+    expect(pane.match(/"key":"purpose-/g)?.length).toBe(2)
+    expect(pane).not.toContain('▌')
     expect(pane).not.toContain('작업 계획')
     expect(pane).not.toContain('단계 밖')
-    expect(pane).not.toContain('▸')
   })
 }
 

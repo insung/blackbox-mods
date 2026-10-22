@@ -42,10 +42,11 @@ export type ActionEntry = {
   t: number
   at: string
   turn: number
-  kind: 'command' | 'file'
-  /** command: 실행한 명령, file: 파일 경로 */
+  /** agent: 하위 에이전트에게 일을 맡긴 Agent 호출. 뒤따르는 하위 에이전트 기록의 목적이 된다 */
+  kind: 'command' | 'file' | 'agent'
+  /** command: 실행한 명령, file: 파일 경로, agent: 하위 에이전트 종류 */
   target: string
-  /** command: Bash description, file: 수정·작성 */
+  /** command: Bash description, file: 수정·작성, agent: Agent description */
   note: string
   status: 'done' | 'failed' | 'denied'
   /** command: 출력 앞부분 (실패면 오류 글, 거부면 거부 이유). file: 빈 값 */
@@ -249,6 +250,8 @@ declare module 'claude-code' {
       agreements: Agreement[]
       /** 암묵적 합의 탭에서 한 번에 답하려고 고른 항목 id */
       pickedAgreements: string[]
+      /** 세션 로그에서 펼친 목적 묶음의 버튼 키 */
+      openPurposes: string[]
       lastPrompt: string
     }
   }
