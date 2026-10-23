@@ -1,17 +1,24 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { ActionEntry, Agreement, Decision, Note, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabId, TreeView, Turn } from '../types'
+import type { ActionEntry, Agreement, Decision, Note, SavedRecords, SavedSession, SessionCommit, IssueMeta, IssueRef, QueryRun, ReadEntry, RepoView, SkillGroup, SkillHit, StoredEntry, TabGroupId, TabId, TreeView, Turn } from '../types'
 
 const LOG_PANE = 'blackbox-mods'
 const TABS: { id: TabId; label: string }[] = [
   { id: 'log', label: '세션 로그' },
   { id: 'decisions', label: '결정 사항' },
-  { id: 'issues', label: 'Git' },
+  { id: 'issues', label: '이슈' },
   { id: 'tree', label: '워크 트리' },
   { id: 'skills', label: '스킬 사용량' },
   { id: 'agreements', label: '암묵적 합의' },
   { id: 'notes', label: '노트' },
+]
+/** 위 줄의 탭 묶음. 하위 탭이 하나뿐인 묶음은 둘째 줄을 그리지 않는다 */
+const TAB_GROUPS: { id: TabGroupId; label: string; tabs: TabId[] }[] = [
+  { id: 'confirm', label: '결정·합의', tabs: ['decisions', 'agreements'] },
+  { id: 'git', label: 'Git', tabs: ['issues', 'tree'] },
+  { id: 'log', label: '세션 로그', tabs: ['log'] },
+  { id: 'more', label: '그 외', tabs: ['notes', 'skills'] },
 ]
 const READ_TOOL = 'note_reads'
 const SUMMARY_LIMIT = 30
@@ -87,7 +94,11 @@ const wideNotes = atom({ plugin: 'blackbox-mods', key: 'wideNotes' } as const, [
 /** 세션 로그에서 펼친 목적 묶음의 버튼 키 */
 const openPurposes = atom({ plugin: 'blackbox-mods', key: 'openPurposes' } as const, [] as string[])
 const lastPrompt = atom({ plugin: 'blackbox-mods', key: 'lastPrompt' } as const, '')
-const tab = atom({ plugin: 'blackbox-mods', key: 'tab' } as const, 'log' as TabId)
+const tab = atom({ plugin: 'blackbox-mods', key: 'tab' } as const, 'decisions' as TabId)
+/** 묶음마다 마지막에 본 하위 탭. 묶음을 다시 누르면 이 탭을 연다 */
+const lastTabs = atom({ plugin: 'blackbox-mods', key: 'lastTabs' } as const, {} as Partial<Record<TabGroupId, TabId>>)
+/** Git 탭에서 기본 접힘 상태를 뒤집은 저장소 묶음(`h:` 처리, `c:` 참고 + owner/repo) */
+const toggledRepos = atom({ plugin: 'blackbox-mods', key: 'toggledRepos' } as const, [] as string[])
 const logPage = atom({ plugin: 'blackbox-mods', key: 'logPage' } as const, '')
 let githubUser = ''
 
@@ -316,7 +327,7 @@ async function restoreSession($: EngineInterface): Promise<void> {
       await update($, agreements, () => listOf<Agreement>(saved.agreements))
       await update($, notes, () => listOf<Note>(saved.notes))
       await update($, lastPrompt, () => textOf(saved.lastPrompt))
-      await update($, tab, () => (TABS.some(one => one.id === saved.tab) ? (saved.tab as TabId) : 'log'))
+      await update($, tab, () => (TABS.some(one => one.id === saved.tab) ? (saved.tab as TabId) : 'decisions'))
       await update($, logPage, () => textOf(saved.logPage))
     } finally {
       isRestoring = false
@@ -935,6 +946,47 @@ export function ciOf(rollup: unknown): 'pass' | 'fail' | 'pending' | 'none' {
   return 'pass'
 }
 
+/** gh 의 연결 목록(closingIssuesReferences·closedByPullRequestsReferences)을 owner/repo#number key 로 바꾼다 */
+export function linksOf(list: unknown): string[] {
+  const items = Array.isArray(list) ? (list as { number?: number; url?: string; repository?: { name?: string; owner?: { login?: string } } }[]) : []
+  return items.flatMap(item => {
+    const m = (item.url ?? '').match(/github\.com\/([^/]+)\/([^/]+)\/(?:issues|pull)\/(\d+)/)
+    if (m) return [`${m[1]}/${m[2]}#${m[3]}`]
+    const owner = item.repository?.owner?.login
+    const repo = item.repository?.name
+    return owner && repo && item.number ? [`${owner}/${repo}#${item.number}`] : []
+  })
+}
+
+/**
+ * 같은 목록에서 GitHub 이 이은 PR 을 이슈 아래로 옮긴다. 이슈 쪽·PR 쪽 어느 연결이든 쓴다.
+ * PR 은 목록에서 먼저 나온 이슈 하나에만 붙고, 잇지 못한 PR 과 이슈는 제자리에 남는다
+ */
+export function nestPulls(refs: readonly IssueRef[], metas: Record<string, IssueMeta>): { ref: IssueRef; pulls: IssueRef[] }[] {
+  const isPull = (ref: IssueRef) => {
+    const meta = metas[ref.key]
+    return meta && !('error' in meta) ? meta.isPull : ref.isPull
+  }
+  const linksOfKey = (key: string) => {
+    const meta = metas[key]
+    return meta && !('error' in meta) ? (meta.links ?? []) : []
+  }
+  const issuesInList = refs.filter(ref => !isPull(ref))
+  const parentOf = new Map<string, string>()
+  for (const pull of refs.filter(isPull)) {
+    const parent = issuesInList.find(issue => linksOfKey(pull.key).includes(issue.key) || linksOfKey(issue.key).includes(pull.key))
+    if (parent) parentOf.set(pull.key, parent.key)
+  }
+  return refs
+    .filter(ref => !parentOf.has(ref.key))
+    .map(ref => ({ ref, pulls: refs.filter(one => parentOf.get(one.key) === ref.key) }))
+}
+
+/** 저장소 묶음이 펼쳐졌는지: 처리한 묶음(`h:`)은 펼침, 참고한 묶음(`c:`)은 접힘이 기본이고, 누른 묶음은 뒤집는다 */
+export function isRepoOpen(key: string, toggled: readonly string[]): boolean {
+  return key.startsWith('h:') !== toggled.includes(key)
+}
+
 /** fetchMeta 가 낸 출력(첫 줄 pr|issue, 다음 줄 gh --json 결과)을 읽는다 */
 export function parseMeta(output: string): IssueMeta {
   const cut = output.indexOf('\n')
@@ -952,6 +1004,7 @@ export function parseMeta(output: string): IssueMeta {
       additions: Number(data.additions ?? 0),
       deletions: Number(data.deletions ?? 0),
       ci: isPull ? ciOf(data.statusCheckRollup) : 'none',
+      links: linksOf(isPull ? data.closingIssuesReferences : data.closedByPullRequestsReferences),
     }
   } catch {
     return { error: '응답을 읽지 못함' }
@@ -963,8 +1016,8 @@ async function fetchMeta($: EngineInterface, ref: IssueRef): Promise<IssueMeta> 
     'if [ -n "$1" ]; then t=$(gh auth token --user "$1" 2>/dev/null); [ -n "$t" ] && export GH_TOKEN="$t"; fi',
     'kind=$(gh api "repos/$2/$3/issues/$4" --jq \'if .pull_request then "pr" else "issue" end\') || exit 1',
     'echo "$kind"',
-    'if [ "$kind" = pr ]; then gh pr view "$4" --repo "$2/$3" --json title,state,isDraft,headRefName,additions,deletions,statusCheckRollup;',
-    'else gh issue view "$4" --repo "$2/$3" --json title,state,stateReason; fi',
+    'if [ "$kind" = pr ]; then gh pr view "$4" --repo "$2/$3" --json title,state,isDraft,headRefName,additions,deletions,statusCheckRollup,closingIssuesReferences;',
+    'else gh issue view "$4" --repo "$2/$3" --json title,state,stateReason,closedByPullRequestsReferences; fi',
   ].join('\n')
   const ran = await $.process.run(['sh', '-c', script, 'sh', githubUser, ref.owner, ref.repo, String(ref.number)], {
     timeoutMs: 20000,
@@ -1548,7 +1601,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'blackbox-mods',
-      description: 'Blackbox 패널을 연다 (탭: 세션 로그·결정 사항·Git·워크 트리·스킬 사용량·암묵적 합의·노트)',
+      description: 'Blackbox 패널을 연다 (탭: 결정·합의·Git·세션 로그·그 외)',
     })
     await $.tool.register({
       name: DECISION_TOOL,
@@ -1764,7 +1817,7 @@ export const register: Register = (on, options) => {
     await refreshIssues($).catch(() => undefined)
     await refreshSkills($).catch(() => undefined)
 
-    return { text: 'Blackbox 패널을 열었다. 위쪽 탭으로 세션 로그·결정 사항·Git·워크 트리·스킬 사용량·암묵적 합의·노트를 바꿔 본다.' }
+    return { text: 'Blackbox 패널을 열었다. 위쪽 탭(결정·합의·Git·세션 로그·그 외)과 그 아래 하위 탭으로 바꿔 본다.' }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -1992,8 +2045,34 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    const groupOf = (id: TabId) => TAB_GROUPS.find(group => group.tabs.includes(id)) ?? TAB_GROUPS[0]!
+    const currentGroup = groupOf(current)
+    const remembered = await read($, lastTabs)
+    const countOf = (id: TabId) => (id === 'decisions' ? pendingCount : id === 'agreements' ? assumedCount : 0)
+    const toggled = await read($, toggledRepos)
+    const repoHead = (key: string, text: string, open: boolean, dim: boolean) => (
+      <Button key={`repo-${key}`} label={`${open ? '▾' : '▸'} ${text}`} plain dimColor={dim} onPress={() => update($, toggledRepos, keys => togglePick(keys, key))} />
+    )
+    /** 상태 배지와 번호는 좁아지지 않게 두고 제목만 다음 줄로 넘긴다 */
+    const refRow = (ref: IssueRef, lead: string, isHandled: boolean) => {
+      const meta = metas[ref.key]
+      const hasMeta = meta !== undefined && !('error' in meta)
+      const isPull = hasMeta ? meta.isPull : ref.isPull
+      const url = ref.url.replace(/\/(issues|pull)\//, isPull ? '/pull/' : '/issues/')
+      const badge = stateBadge(meta, ref.isPull)
+      return (
+        <Box flexDirection="row">
+          <Box flexDirection="row" flexShrink={0}>
+            <Text bold={isHandled} color={badge.color}>{`${lead}${badge.text}  `}</Text>
+            {issueLink(url, `#${ref.number}`)}
+          </Box>
+          {isHandled ? hasMeta && <Text>{`  ${cut(meta.title, 70)}`}</Text> : <Text dimColor>{`  ${hasMeta ? cut(meta.title, 70) : '읽는 중…'}`}</Text>}
+        </Box>
+      )
+    }
     const choose = async (id: TabId) => {
       await update($, tab, () => id)
+      await update($, lastTabs, all => ({ ...all, [groupOf(id).id]: id }))
       if (id === 'tree') await refreshTree($).catch(() => undefined)
       if (id === 'issues') await refreshIssues($).catch(() => undefined)
       if (id === 'skills') await refreshSkills($).catch(() => undefined)
@@ -2001,16 +2080,32 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="row" marginBottom={1}>
-          {TABS.map(one => (
-            <Button
-              key={`tab-${one.id}`}
-              label={`${one.id === current ? '▶ ' : '  '}${one.label}${one.id === 'decisions' && pendingCount > 0 ? ` (${pendingCount})` : ''}${one.id === 'agreements' && assumedCount > 0 ? ` (${assumedCount})` : ''}`}
-              dimColor={one.id !== current}
-              onPress={() => choose(one.id)}
-            />
-          ))}
+        <Box flexDirection="row" marginBottom={currentGroup.tabs.length > 1 ? 0 : 1}>
+          {TAB_GROUPS.map(group => {
+            const count = group.tabs.reduce((sum, id) => sum + countOf(id), 0)
+            return (
+              <Button
+                key={`group-${group.id}`}
+                label={`${group.id === currentGroup.id ? '▶ ' : '  '}${group.label}${count > 0 ? ` (${count})` : ''}`}
+                dimColor={group.id !== currentGroup.id}
+                onPress={() => choose(remembered[group.id] ?? group.tabs[0]!)}
+              />
+            )
+          })}
         </Box>
+        {currentGroup.tabs.length > 1 && (
+          <Box flexDirection="row" marginBottom={1}>
+            {currentGroup.tabs.map(id => (
+              <Button
+                key={`tab-${id}`}
+                label={`${id === current ? '▶ ' : '  '}${TABS.find(one => one.id === id)?.label ?? id}${countOf(id) > 0 ? ` (${countOf(id)})` : ''}`}
+                plain
+                dimColor={id !== current}
+                onPress={() => choose(id)}
+              />
+            ))}
+          </Box>
+        )}
         {current === 'log' && (
           <Box flexDirection="column">
             {logGroups.length === 0 && <Text dimColor>아직 기록이 없다.</Text>}
@@ -2191,57 +2286,56 @@ export const register: Register = (on, options) => {
                 <Text dimColor>{issueAt ? `  ${issueAt} 기준 · 처리 ${handled.length}건 · 참고 ${consulted.length}건` : '  아직 읽지 않았다'}</Text>
               </Box>
               {issueAt && handled.length === 0 && linked.unlinked.length === 0 && <Text dimColor>이 세션에서 처리한 GitHub 이슈·PR 과 커밋이 없다.</Text>}
-              {handledGroups.map(group => (
-                <Box flexDirection="column" marginTop={1}>
-                  <Text bold color="claude">{!group.repo ? '▸ 저장소 모름' : group.refs.length > 0 ? `▸ ${group.repo}  ${group.refs.length}건` : `▸ ${group.repo}`}</Text>
-                  {group.refs.map(ref => {
-                    const meta = metas[ref.key]
-                    const hasMeta = meta !== undefined && !('error' in meta)
-                    const isPull = hasMeta ? meta.isPull : ref.isPull
-                    const url = ref.url.replace(/\/(issues|pull)\//, isPull ? '/pull/' : '/issues/')
-                    const badge = stateBadge(meta, ref.isPull)
-                    return (
-                      <Box flexDirection="column">
-                        <Box flexDirection="row">
-                          <Text bold color={badge.color}>{`  ${badge.text}  `}</Text>
-                          {issueLink(url, `#${ref.number}`)}
-                          {hasMeta && <Text>{`  ${cut(meta.title, 70)}`}</Text>}
-                        </Box>
-                        {!hasMeta && <Text dimColor>{`        ${meta && 'error' in meta ? `읽지 못함: ${meta.error}` : '읽는 중…'}`}</Text>}
-                        {branchRows(linked.byKey[ref.key] ?? [], '        ')}
-                      </Box>
-                    )
-                  })}
-                  {group.commits.length > 0 && (
+              {handledGroups.map(group => {
+                const key = `h:${group.repo}`
+                const open = isRepoOpen(key, toggled)
+                const handledRow = (ref: IssueRef, lead: string) => {
+                  const meta = metas[ref.key]
+                  const hasMeta = meta !== undefined && !('error' in meta)
+                  return (
                     <Box flexDirection="column">
-                      <Text bold>{`  이슈 없는 커밋  ${group.commits.length}건`}</Text>
-                      {branchRows(group.commits, '        ')}
+                      {refRow(ref, lead, true)}
+                      {!hasMeta && <Text dimColor>{`        ${meta && 'error' in meta ? `읽지 못함: ${meta.error}` : '읽는 중…'}`}</Text>}
+                      {branchRows(linked.byKey[ref.key] ?? [], '        ')}
                     </Box>
-                  )}
-                </Box>
-              ))}
+                  )
+                }
+                return (
+                  <Box flexDirection="column" marginTop={1}>
+                    {!group.repo ? <Text bold color="claude">▸ 저장소 모름</Text> : repoHead(key, group.refs.length > 0 ? `${group.repo}  ${group.refs.length}건` : group.repo, open, false)}
+                    {(open || !group.repo) && nestPulls(group.refs, metas).map(row => (
+                      <Box flexDirection="column">
+                        {handledRow(row.ref, '  ')}
+                        {row.pulls.map(pull => handledRow(pull, '    └ '))}
+                      </Box>
+                    ))}
+                    {(open || !group.repo) && group.commits.length > 0 && (
+                      <Box flexDirection="column">
+                        <Text bold>{`  이슈 없는 커밋  ${group.commits.length}건`}</Text>
+                        {branchRows(group.commits, '        ')}
+                      </Box>
+                    )}
+                  </Box>
+                )
+              })}
               {consulted.length > 0 && (
                 <Box flexDirection="column" marginTop={1}>
                   <Text bold dimColor>{`참고한 이슈·PR  ${consulted.length}건`}</Text>
-                  {groupByRepo(consulted).map(group => (
-                    <Box flexDirection="column" marginTop={1}>
-                      <Text dimColor>{`  ▸ ${group.repo}`}</Text>
-                      {group.refs.map(ref => {
-                        const meta = metas[ref.key]
-                        const hasMeta = meta !== undefined && !('error' in meta)
-                        const isPull = hasMeta ? meta.isPull : ref.isPull
-                        const url = ref.url.replace(/\/(issues|pull)\//, isPull ? '/pull/' : '/issues/')
-                        const badge = stateBadge(meta, ref.isPull)
-                        return (
-                          <Box flexDirection="row">
-                            <Text color={badge.color}>{`    ${badge.text}  `}</Text>
-                            {issueLink(url, `#${ref.number}`)}
-                            <Text dimColor>{`  ${hasMeta ? cut(meta.title, 70) : '읽는 중…'}`}</Text>
+                  {groupByRepo(consulted).map(group => {
+                    const key = `c:${group.repo}`
+                    const open = isRepoOpen(key, toggled)
+                    return (
+                      <Box flexDirection="column" marginTop={1}>
+                        {repoHead(key, `${group.repo}  ${group.refs.length}건`, open, true)}
+                        {open && nestPulls(group.refs, metas).map(row => (
+                          <Box flexDirection="column">
+                            {refRow(row.ref, '    ', false)}
+                            {row.pulls.map(pull => refRow(pull, '      └ ', false))}
                           </Box>
-                        )
-                      })}
-                    </Box>
-                  ))}
+                        ))}
+                      </Box>
+                    )
+                  })}
                 </Box>
               )}
             </Box>
