@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { ActionEntry, QueryRun, SavedRecords, SavedSession, StoredEntry } from '../types'
-import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, addNote, editNote, removeNote, noteRows, noteTitleOf, titleNote, quotedNote, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords, purposeGroups, purposeResult } from '../hooks/register'
+import { actionOf, collectCommits, shownSources, groupHandled, handledActions, refsFromCommits, repoOfRemote, splitHandled, commitMessageOf, commitsInRun, dedupeCommits, linkCommits, parseCommitLookup, commandText, outputText, answerLine, executedPart, applyAgreements, applyDecisions, ciOf, classifySkill, parseMeta, stateBadge, linksOf, nestPulls, isRepoOpen, columnsOf, shortSummary, askAnswers, cdTargetsOf, collectIssues, collectSkillHits, groupByRepo, descriptionOf, matchedPhrases, userWords, refsInGhCommand, refsInText, databaseOf, parseWorktrees, purposeOf, togglePick, pickedIds, addNote, editNote, removeNote, noteRows, noteTitleOf, titleNote, quotedNote, mdField, mdFence, mdInline, sqlOf, tablesOf, plainText, movePage, pageIndex, KEEP_MS, STORE_BUDGET, entryBytes, jsonBytes, keysToDelete, savedRecordsOf, sessionKey, shrinkRecords, purposeGroups, purposeResult } from '../hooks/register'
 
 function watch(on: any) {
   const seen: { runs: QueryRun[]; actions: ActionEntry[] } = { runs: [], actions: [] }
@@ -13,8 +13,19 @@ function watch(on: any) {
   return seen
 }
 
+const GROUP_OF: Record<string, string> = { decisions: 'confirm', agreements: 'confirm', issues: 'git', tree: 'git', log: 'log', notes: 'more', skills: 'more' }
+
+/** 위 줄의 묶음 탭을 누르고, 하위 탭이 있으면 그 탭도 누른다 */
+async function openTab($: any, id: string, surface: string): Promise<void> {
+  await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface })
+  await $.ui.press({ plugin: 'blackbox-mods', key: `group-${GROUP_OF[id]}`, surface })
+  await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface })
+  if (id !== 'log') await $.ui.press({ plugin: 'blackbox-mods', key: `tab-${id}`, surface })
+}
+
 /** 세션 로그의 목적 묶음을 모두 펼친 뒤 다시 그린 패널 */
 async function expandLog($: any, surface: string): Promise<string> {
+  await openTab($, 'log', surface)
   const render = async () => JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface }))
   for (const match of (await render()).matchAll(/"key":"(purpose-[^"]+)"/g)) {
     await $.ui.press({ plugin: 'blackbox-mods', key: match[1], surface })
@@ -94,7 +105,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const log = await expandLog($, surface)
     expect(log).toContain('SELECT a FROM t')
     expect(log).toContain('▶ 세션 로그')
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-tree', surface } as any)
+    await openTab($, 'tree', surface)
     const treePane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(treePane).toContain('▶ 워크 트리')
     expect(treePane).toContain('refresh-tree')
@@ -169,13 +180,13 @@ for (const surface of ['terminal', 'desktop'] as const) {
     })
     on('session.cwd', async () => ({ value: '/tmp' }) as any)
     await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface } as any)
+    await openTab($, 'issues', surface)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('▶ Git')
     expect(pane).not.toContain('깃헙')
-    expect(pane).toContain('▸ o/dmp.crawler  2건')
+    expect(pane).toContain('▾ o/dmp.crawler  2건')
     expect(pane).not.toContain('  dmp.crawler  ')
-    expect(pane.indexOf('▸ o/dmp.crawler')).toBeLessThan(pane.indexOf('#35'))
+    expect(pane.indexOf('▾ o/dmp.crawler')).toBeLessThan(pane.indexOf('#35'))
     expect(pane).toContain('"children":["1a2b3c4"]')
     expect(pane).toContain(' fix: 9번 수정')
     expect(pane).toContain(' docs: 문서 보완')
@@ -232,15 +243,15 @@ for (const surface of ['terminal', 'desktop'] as const) {
     })
     on('session.cwd', async () => ({ value: '/tmp' }) as any)
     await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface } as any)
+    await openTab($, 'issues', surface)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     const at = (text: string) => pane.indexOf(text)
-    expect(pane).toContain('▸ a/x  2건')
-    expect(pane).toContain('▸ b/y  1건')
-    expect(at('▸ a/x')).toBeLessThan(at('제목 a/x#3'))
+    expect(pane).toContain('▾ a/x  2건')
+    expect(pane).toContain('▾ b/y  1건')
+    expect(at('▾ a/x')).toBeLessThan(at('제목 a/x#3'))
     expect(at('제목 a/x#3')).toBeLessThan(at('제목 a/x#1'))
-    expect(at('제목 a/x#1')).toBeLessThan(at('▸ b/y'))
-    expect(at('▸ b/y')).toBeLessThan(at('제목 b/y#1'))
+    expect(at('제목 a/x#1')).toBeLessThan(at('▾ b/y'))
+    expect(at('▾ b/y')).toBeLessThan(at('제목 b/y#1'))
     // 참고 항목이 없으면 구분선도 없다
     expect(pane).not.toContain('─────')
     expect(pane).toContain('3건')
@@ -374,18 +385,21 @@ for (const surface of ['terminal', 'desktop'] as const) {
     })
     on('session.cwd', async () => ({ value: '/tmp' }) as any)
     await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface } as any)
+    await openTab($, 'issues', surface)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'repo-c:o/r', surface } as any)
+    await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'repo-c:p/q', surface } as any)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     const at = (text: string) => pane.indexOf(text)
     expect(pane).toContain('처리 1건 · 참고 2건')
-    expect(pane).toContain('▸ o/r  1건')
+    expect(pane).toContain('▾ o/r  1건')
     // 처리 줄에는 동작 이름을 보이지 않는다
     expect(pane).not.toContain('생성')
     expect(pane).toContain('▸ 저장소 모름')
     // 커밋만 있는 저장소는 머리줄에 건수를 붙이지 않는다
-    expect(pane).toContain('"▸ w/z"')
-    expect(pane).not.toContain('▸ w/z  0건')
-    expect(at('▸ w/z')).toBeLessThan(at('1b1b1b1'))
+    expect(pane).toContain('"▾ w/z"')
+    expect(pane).not.toContain('▾ w/z  0건')
+    expect(at('▾ w/z')).toBeLessThan(at('1b1b1b1'))
     expect(at('1b1b1b1')).toBeLessThan(at('▸ 저장소 모름'))
     expect(at('제목 o/r#29')).toBeLessThan(at('▸ 저장소 모름'))
     expect(at('▸ 저장소 모름')).toBeLessThan(at('9a8b7c6'))
@@ -447,7 +461,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('session.cwd', async () => ({ value: '/tmp' }) as any)
     on('session.root', async () => ({ value: '/tmp' }) as any)
     await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-skills', surface } as any)
+    await openTab($, 'skills', surface)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('▶ 스킬 사용량')
     expect(pane).toContain('플러그인 git-workflow  3회 · 75%')
@@ -541,7 +555,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'Edit', file_path: '/r/.worktree/x/src/a.ts', old_string: 'a', new_string: 'b' } as any)
     await ($.tool.call as any)({ tool: 'Read', file_path: '/s/notes.md' } as any)
     await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-tree', surface } as any)
+    await openTab($, 'tree', surface)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     const at = (text: string) => pane.indexOf(text)
     // 바꾼 워크트리만 처음 바꾼 순서로 보이고, 손대지 않은 워크트리와 읽기만 한 곳은 보이지 않는다
@@ -568,7 +582,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('session.messages', async () => ({ value: [] }) as any)
     on('process.run', async () => ({ value: { exitCode: 0, stdout: 'worktree /r\nHEAD 1\nbranch refs/heads/main\n', stderr: '' } }) as any)
     await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-tree', surface } as any)
+    await openTab($, 'tree', surface)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(pane).toContain('이 세션에서 파일을 바꾼 워크트리가 없다.')
     expect(pane).not.toContain('open-/r')
@@ -645,6 +659,70 @@ test('reads PR and issue state, diff and CI', async () => {
   expect(stateBadge(parseMeta('issue\n{"state":"CLOSED","stateReason":"NOT_PLANNED"}'), false).text).toBe('⊘ 닫힘')
 })
 
+test('reads issue-PR links from gh and puts each PR under the issue it closes', async () => {
+  const pr = parseMeta('pr\n{"state":"MERGED","closingIssuesReferences":[{"number":94,"repository":{"name":"hub","owner":{"login":"o"}},"url":"https://github.com/o/hub/issues/94"}]}')
+  const issue = parseMeta('issue\n{"state":"CLOSED","closedByPullRequestsReferences":[{"number":100,"repository":{"name":"hub","owner":{"login":"o"}}}]}')
+  expect(pr).toMatchObject({ links: ['o/hub#94'] })
+  expect(issue).toMatchObject({ links: ['o/hub#100'] })
+  expect(linksOf(undefined)).toEqual([])
+  const ref = (number: number, isPull: boolean) => ({ key: `o/hub#${number}`, owner: 'o', repo: 'hub', number, isPull, url: '', order: number }) as any
+  const refs = [ref(96, true), ref(94, false), ref(66, false), ref(100, true), ref(7, true)]
+  // #96 은 PR 쪽 연결, #100 은 이슈 쪽 연결로 이슈 아래에 붙는다. 연결 없는 #7 은 제자리에 남는다
+  const metas = {
+    'o/hub#96': pr,
+    'o/hub#94': parseMeta('issue\n{"state":"CLOSED"}'),
+    'o/hub#66': parseMeta('issue\n{"state":"CLOSED","closedByPullRequestsReferences":[{"url":"https://github.com/o/hub/pull/100"}]}'),
+    'o/hub#100': parseMeta('pr\n{"state":"MERGED"}'),
+    'o/hub#7': parseMeta('pr\n{"state":"OPEN"}'),
+  }
+  expect(nestPulls(refs, metas).map(row => [row.ref.number, row.pulls.map(one => one.number)])).toEqual([
+    [94, [96]],
+    [66, [100]],
+    [7, []],
+  ])
+  expect(isRepoOpen('h:o/hub', [])).toBe(true)
+  expect(isRepoOpen('c:o/hub', [])).toBe(false)
+  expect(isRepoOpen('h:o/hub', ['h:o/hub'])).toBe(false)
+  expect(isRepoOpen('c:o/hub', ['c:o/hub'])).toBe(true)
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`draws a linked PR under its issue and keeps the badge on one line on ${surface}`, async ($, on) => {
+    on('session.messages', async () => ({
+      value: [{ role: 'user', text: 'https://github.com/o/hub/pull/96 와 https://github.com/o/hub/issues/94', toolUses: [] }],
+    }) as any)
+    on('process.run', async (_$: unknown, e: any) => {
+      const number = e.argv.at(-1)
+      const stdout =
+        number === '96'
+          ? 'pr\n{"title":"화면 API 저장소를 바로잡는다","state":"MERGED","closingIssuesReferences":[{"url":"https://github.com/o/hub/issues/94"}]}'
+          : 'issue\n{"title":"저장소 바로잡기","state":"CLOSED","stateReason":"COMPLETED"}'
+      return { value: { exitCode: 0, stdout, stderr: '' } } as any
+    })
+    on('session.cwd', async () => ({ value: '/tmp' }) as any)
+    await openTab($, 'issues', surface)
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'repo-c:o/hub', surface } as any)
+    const tree = await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
+    const pane = JSON.stringify(tree)
+    const at = (text: string) => pane.indexOf(text)
+    expect(at('저장소 바로잡기')).toBeLessThan(at('└ ⎇ 머지됨'))
+    expect(at('└ ⎇ 머지됨')).toBeLessThan(at('화면 API 저장소를 바로잡는다'))
+    // 배지와 번호는 줄어들지 않는 칸에 함께 있다
+    expect(pane).toContain('"flexShrink":0},"children":[{"type":"Text","props":{"bold":false,"color":"merged"},"children":["    ✓ 완료  "]}')
+  })
+}
+
+test('opens the last sub-tab of a group when the group is pressed again', async ($, on) => {
+  answerTools(on)
+  await openTab($, 'tree', 'terminal')
+  await openTab($, 'notes', 'terminal')
+  await $.ui.press({ plugin: 'blackbox-mods', key: 'group-git', surface: 'terminal' } as any)
+  const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any))
+  expect(pane).toContain('▶ Git')
+  expect(pane).toContain('▶ 워크 트리')
+  expect(pane).not.toContain('▶ 이슈')
+})
+
 test('reads only gh commands the shell runs, not text inside heredocs or quotes', async () => {
   const command = "cat > t.ts <<'EOF'\nrefsInGhCommand('gh issue create --repo o/r --title t', '')\nEOF\necho 'gh pr merge https://github.com/o/r/pull/5'"
   expect(executedPart(command)).not.toContain('o/r')
@@ -682,8 +760,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
     })
     on('session.cwd', async () => ({ value: '/tmp' }) as any)
     await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any)
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface } as any)
+    await openTab($, 'issues', surface)
+    // 참고한 묶음은 접힌 채로 보이고, 저장소 줄을 누르면 펼쳐진다
+    const folded = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(folded).toContain('▸ a/b  1건')
+    expect(folded).not.toContain('있는 이슈')
+    await $.ui.press({ plugin: 'blackbox-mods', key: 'repo-c:a/b', surface } as any)
     const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
+    expect(pane).toContain('▾ a/b  1건')
     expect(pane).toContain('있는 이슈')
     expect(pane).toContain('1건')
     expect(pane).not.toContain('#12')
@@ -758,6 +842,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await $.prompt.submit({ text: '둘째 요청' } as any).catch(() => undefined)
     await ($.tool.call as any)({ tool: 'Bash', description: '둘째 명령', command: 'ls two' } as any)
     // 목적 묶음은 접혀 있어 머리줄의 목적으로 요청 묶음을 가린다
+    await openTab($, 'log', surface)
     let pane = await render()
     expect(pane).toContain('  2 / 2  ')
     expect(pane).toContain('▸ 둘째 명령')
@@ -829,6 +914,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ($.tool.call as any)({ tool: 'Agent', description: '카드 엔진 1~3단계 구현', subagent_type: 'general-purpose', prompt: '…' } as any)
     await ($.tool.call as any)({ tool: 'Bash', command: 'git status' } as any)
     await ($.tool.call as any)({ tool: 'Write', file_path: '/tmp/engine.py', content: '' } as any)
+    await openTab($, 'log', surface)
     const folded = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     expect(folded).toContain('▸ 이슈 본문 확인')
     expect(folded).toContain('▸ 카드 엔진 1~3단계 구현')
@@ -925,9 +1011,11 @@ for (const surface of ['terminal', 'desktop'] as const) {
     })
     expect(JSON.stringify(ran)).toContain('a1')
     const before = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
-    expect(before).toContain('▶ 세션 로그')
+    // 처음 열면 결정·합의 묶음이 보이고, 묶음 탭에는 하위 탭 대기 수의 합이 붙는다
+    expect(before).toContain('▶ 결정·합의 (1)')
+    expect(before).toContain('▶ 결정 사항')
     expect(before).toContain('암묵적 합의 (1)')
-    expect(before.indexOf('스킬 사용량')).toBeLessThan(before.indexOf('암묵적 합의'))
+    expect(before.indexOf('그 외')).toBeLessThan(before.indexOf('암묵적 합의'))
     await ($.tool.call as any)({
       tool: 'mcp__blackbox-mods__track_agreements',
       items: [
@@ -935,7 +1023,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
         { statement: '셋째 전제', kind: 'term', evidence: '근거 3', status: 'assumed' },
       ],
     })
-    await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-agreements', surface } as any)
+    await openTab($, 'agreements', surface)
     const render = async () => JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
     const pane = await render()
     expect(pane).toContain('[?] a1. (작업 방식) 등록 시 탭을 바꾸지 않는다')
@@ -1253,7 +1341,7 @@ test('opens an issue in the built-in browser when its number is pressed on deskt
   const runs: string[][] = []
   answerIssue(on, calls, runs, false)
   await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'desktop' } as any)
-  await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface: 'desktop' } as any)
+  await openTab($, 'issues', 'desktop')
   await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'desktop' } as any)
   await $.ui.press({ plugin: 'blackbox-mods', key: 'issue-https://github.com/a/x/issues/7', surface: 'desktop' } as any)
   expect(calls).toEqual([{ server: 'Claude_Browser', tool: 'preview_start', args: { url: 'https://github.com/a/x/issues/7' } }])
@@ -1265,7 +1353,7 @@ test('opens the system browser when the built-in browser fails', async ($, on) =
   const runs: string[][] = []
   answerIssue(on, calls, runs, true)
   await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'desktop' } as any)
-  await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface: 'desktop' } as any)
+  await openTab($, 'issues', 'desktop')
   await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'desktop' } as any)
   await $.ui.press({ plugin: 'blackbox-mods', key: 'issue-https://github.com/a/x/issues/7', surface: 'desktop' } as any)
   expect(runs.find(argv => argv[0] === 'open')).toEqual(['open', 'https://github.com/a/x/issues/7'])
@@ -1274,7 +1362,7 @@ test('opens the system browser when the built-in browser fails', async ($, on) =
 test('keeps the issue number a link on terminal', async ($, on) => {
   answerIssue(on, [], [], false)
   await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any)
-  await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-issues', surface: 'terminal' } as any)
+  await openTab($, 'issues', 'terminal')
   const pane = JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface: 'terminal' } as any))
   expect(pane).toContain('"href":"https://github.com/a/x/issues/7"')
   expect(pane).not.toContain('issue-https://github.com/a/x/issues/7')
@@ -1335,7 +1423,7 @@ test('notes tab: takes the clipboard as it is in UTF-8, titles it, edits in plac
   on('session.cwd', async () => ({ value: '/tmp' }) as any)
   const render = async (surface = 'desktop') => JSON.stringify(await $.ui.render({ component: 'Pane', requestId: 'blackbox-mods', surface } as any))
   await render()
-  await $.ui.press({ plugin: 'blackbox-mods', key: 'tab-notes', surface: 'desktop' } as any)
+  await openTab($, 'notes', 'desktop')
   let pane = await render()
   expect(pane).toContain('아직 노트가 없다')
   expect(pane).not.toContain('선택한 글 담기')

@@ -111,6 +111,8 @@ export type IssueMeta =
       deletions: number
       /** PR 의 CI: pass·fail·pending·none */
       ci: 'pass' | 'fail' | 'pending' | 'none'
+      /** GitHub 이 이은 상대 key(owner/repo#number). PR: 닫는 이슈, 이슈: 닫은 PR */
+      links?: string[]
     }
   /** notFound: GitHub 이 404 로 답함. 목록에서 숨긴다 */
   | { error: string; notFound?: boolean }
@@ -214,6 +216,9 @@ export type Note = {
 
 export type TabId = 'log' | 'decisions' | 'issues' | 'tree' | 'skills' | 'agreements' | 'notes'
 
+/** 위 줄의 탭 묶음. 하위 탭(TabId)을 둘째 줄에 보인다 */
+export type TabGroupId = 'confirm' | 'git' | 'log' | 'more'
+
 /** 프로세스가 끝나도 남기는 패널 기록. 세션 시작 때 다시 계산하는 값(워크 트리, Git, 스킬 사용량)은 뺀다 */
 export type SavedRecords = {
   turns: Turn[]
@@ -262,6 +267,10 @@ declare module 'claude-code' {
       skillHits: SkillHit[]
       skillsAt: string
       tab: TabId
+      /** 묶음마다 마지막에 본 하위 탭 */
+      lastTabs: Partial<Record<TabGroupId, TabId>>
+      /** Git 탭에서 기본 접힘 상태를 뒤집은 저장소 묶음 */
+      toggledRepos: string[]
       /** 세션 로그에서 보는 요청 묶음의 key. 빈 값이면 마지막 묶음을 따라간다 */
       logPage: string
       decisions: Decision[]
